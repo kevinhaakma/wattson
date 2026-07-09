@@ -222,6 +222,7 @@ class WattsonCoordinator:
     async def _tick(self, _now) -> None:
         prev = (self.advies, self.last_applied)
         try:
+            await self._watchdog()
             await self._plan_and_apply()
             self.last_error = None
         except Exception as err:  # noqa: BLE001 - watchdog: nooit crashen, wel loggen
@@ -239,6 +240,39 @@ class WattsonCoordinator:
         self._log_decision(prev)
         for s in self.sensors:
             s.async_write_ha_state()
+
+    async def _watchdog(self) -> None:
+        """Luistert-niet-detector: meet het werkelijke accuvermogen tegen wat
+        wij gecommandeerd hebben; bij grove afwijking -> noodstop + melding."""
+        if not self.control_enabled:
+            return
+        dis = self._f(self.ent_zd_dis) or 0.0
+        chg = self._f(self.ent_zd_chg) or 0.0
+        verwacht_dis = self.advies in ("ontladen", "bijspringen: ontladen")
+        verwacht_chg = self.advies in ("laden", "bijspringen: laden")
+        afwijking = None
+        if dis > 300 and not verwacht_dis:
+            afwijking = f"accu ontlaadt {dis:.0f} W terwijl '{self.advies}' gecommandeerd is"
+        elif chg > 300 and not verwacht_chg:
+            afwijking = f"accu laadt {chg:.0f} W terwijl '{self.advies}' gecommandeerd is"
+        elif dis > self.params.p_discharge_max_w + 500:
+            afwijking = f"ontlaadvermogen {dis:.0f} W ver boven limiet"
+        if afwijking:
+            self.assist_active = None
+            await self._set_zendure("off", 0.0)
+            if self.adapter == ADAPTER_ZENDURE:
+                # ook op apparaatniveau dichtzetten
+                for ent, val in (("number.solarflow_2400_ac_output_limit", 0),):
+                    try:
+                        await self.hass.services.async_call(
+                            "number", "set_value", {"entity_id": ent, "value": val}, blocking=True)
+                    except Exception:  # noqa: BLE001
+                        pass
+            self.last_error = f"WATCHDOG: {afwijking}"
+            _LOGGER.warning("Wattson watchdog: %s", afwijking)
+            self.hass.bus.async_fire("logbook_entry", {
+                "name": "Wattson", "message": f"WATCHDOG ingegrepen: {afwijking}",
+                "entity_id": "sensor.wattson_advies", "domain": "wattson_ems"})
 
     async def _retry(self, _now) -> None:
         self._retry_cancel = None
@@ -479,6 +513,7 @@ class WattsonCoordinator:
         self.hass.async_create_task(self._assist_apply())
 
     async def _assist_apply(self) -> None:
+        await self._watchdog()
         p1 = self._f(self.ent_p1)
         soc_pct = self._f(self.ent_soc)
         prijs = self._f(self.ent_price)
