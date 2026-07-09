@@ -1,0 +1,36 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Set up Wattson",
+        "description": "Wattson steers your home battery based on dynamic energy prices using a rolling-horizon planner. Only one instance is needed — configure the source entities afterwards via the Options button."
+      }
+    },
+    "abort": {
+      "single_instance_allowed": "Wattson is already configured. Only one instance is allowed."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Wattson — source entities",
+        "description": "Point Wattson at the entities on your own installation.",
+        "data": {
+          "ent_price": "Price sensor (dynamic tariff, with forecast attribute)",
+          "ent_soc": "Battery SoC sensor (%)",
+          "ent_p1": "P1 meter power sensor",
+          "ent_wallbox_1": "Wallbox / EV charger power 1 (optional)",
+          "ent_wallbox_2": "Wallbox / EV charger power 2 (optional)",
+          "ent_pv_now": "Current PV production",
+          "ent_pv_remain": "PV yield remaining today (forecast)",
+          "ent_pv_tomorrow": "PV yield forecast tomorrow",
+          "ent_zd_operation": "Battery operation mode select",
+          "ent_zd_manual": "Battery manual power number entity",
+          "ent_zd_hems": "Battery HEMS / AI-mode status (binary_sensor)",
+          "ent_zd_chg": "Battery charge power sensor (optional)",
+          "ent_zd_dis": "Battery discharge power sensor (optional)"
+        }
+      }
+    }
+  }
+}

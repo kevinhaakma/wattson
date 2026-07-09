@@ -1,0 +1,59 @@
+"""Constanten voor Wattson — slimme thuisaccu."""
+
+DOMAIN = "wattson_ems"
+PLATFORMS = ["sensor", "switch", "select"]
+
+# ---------- config-entry optie-sleutels (bron-entiteiten) ----------
+CONF_ENT_PRICE = "ent_price"
+CONF_ENT_SOC = "ent_soc"
+CONF_ENT_P1 = "ent_p1"
+CONF_ENT_WALLBOX_1 = "ent_wallbox_1"
+CONF_ENT_WALLBOX_2 = "ent_wallbox_2"
+CONF_ENT_PV_NOW = "ent_pv_now"
+CONF_ENT_PV_REMAIN = "ent_pv_remain"
+CONF_ENT_PV_TOMORROW = "ent_pv_tomorrow"
+CONF_ENT_ZD_OPERATION = "ent_zd_operation"
+CONF_ENT_ZD_MANUAL = "ent_zd_manual"
+CONF_ENT_ZD_HEMS = "ent_zd_hems"
+CONF_ENT_ZD_CHG = "ent_zd_chg"
+CONF_ENT_ZD_DIS = "ent_zd_dis"
+
+# ---------- defaults: de huidige entity-ids op deze installatie ----------
+DEFAULT_ENT_PRICE = "sensor.zonneplan_current_electricity_tariff"
+DEFAULT_ENT_SOC = "sensor.solarflow_2400_ac_electric_level"
+DEFAULT_ENT_P1 = "sensor.p1_meter_power"
+DEFAULT_ENT_WALLBOX_1 = "sensor.keba_p20_charging_power"
+DEFAULT_ENT_WALLBOX_2 = "sensor.jimmy_charger_power"
+DEFAULT_ENT_PV_NOW = "sensor.power_production_now"
+DEFAULT_ENT_PV_REMAIN = "sensor.energy_production_today_remaining"
+DEFAULT_ENT_PV_TOMORROW = "sensor.energy_production_tomorrow"
+DEFAULT_ENT_ZD_OPERATION = "select.zendure_manager_operation"
+DEFAULT_ENT_ZD_MANUAL = "number.zendure_manager_manual_power"
+DEFAULT_ENT_ZD_HEMS = "binary_sensor.solarflow_2400_ac_hems_state"
+DEFAULT_ENT_ZD_CHG = "sensor.solarflow_2400_ac_grid_input_power"
+DEFAULT_ENT_ZD_DIS = "sensor.solarflow_2400_ac_output_home_power"
+
+DEFAULT_OPTIONS = {
+    CONF_ENT_PRICE: DEFAULT_ENT_PRICE,
+    CONF_ENT_SOC: DEFAULT_ENT_SOC,
+    CONF_ENT_P1: DEFAULT_ENT_P1,
+    CONF_ENT_WALLBOX_1: DEFAULT_ENT_WALLBOX_1,
+    CONF_ENT_WALLBOX_2: DEFAULT_ENT_WALLBOX_2,
+    CONF_ENT_PV_NOW: DEFAULT_ENT_PV_NOW,
+    CONF_ENT_PV_REMAIN: DEFAULT_ENT_PV_REMAIN,
+    CONF_ENT_PV_TOMORROW: DEFAULT_ENT_PV_TOMORROW,
+    CONF_ENT_ZD_OPERATION: DEFAULT_ENT_ZD_OPERATION,
+    CONF_ENT_ZD_MANUAL: DEFAULT_ENT_ZD_MANUAL,
+    CONF_ENT_ZD_HEMS: DEFAULT_ENT_ZD_HEMS,
+    CONF_ENT_ZD_CHG: DEFAULT_ENT_ZD_CHG,
+    CONF_ENT_ZD_DIS: DEFAULT_ENT_ZD_DIS,
+}
+
+EV_THRESHOLD_KW = 0.5      # daarboven telt als "auto laadt"
+UPDATE_MINUTES = 5         # her-plan interval
+DAGLICHT = (7, 21)         # uren waarbinnen de PV-bel wordt verdeeld
+
+# agressiviteit = plannings-slijtagegewicht (€/kWh doorzet): lager gewicht =
+# cyclen op kleinere prijsspreads. "gebalanceerd" is de getrainde waarde.
+AGGRO_LEVELS = {"rustig": 0.05, "gebalanceerd": 0.02, "agressief": 0.005}
+AGGRO_DEFAULT = "gebalanceerd"

@@ -1,0 +1,36 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Wattson instellen",
+        "description": "Wattson stuurt je thuisaccu op basis van dynamische energieprijzen met een rolling-horizon planner. Er is maar één instantie nodig — de bron-entiteiten stel je hierna in via de Opties-knop."
+      }
+    },
+    "abort": {
+      "single_instance_allowed": "Wattson is al geconfigureerd. Er kan maar één instantie tegelijk actief zijn."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Wattson — bron-entiteiten",
+        "description": "Wijs Wattson naar de entiteiten van jouw eigen installatie.",
+        "data": {
+          "ent_price": "Prijs-sensor (dynamisch tarief, met forecast-attribuut)",
+          "ent_soc": "SoC-sensor accu (%)",
+          "ent_p1": "P1-meter vermogen sensor",
+          "ent_wallbox_1": "Wallbox / laadpaal vermogen 1 (optioneel)",
+          "ent_wallbox_2": "Wallbox / laadpaal vermogen 2 (optioneel)",
+          "ent_pv_now": "PV-productie nu",
+          "ent_pv_remain": "PV-opbrengst resterend vandaag (forecast)",
+          "ent_pv_tomorrow": "PV-opbrengst morgen (forecast)",
+          "ent_zd_operation": "Accu operation-mode select",
+          "ent_zd_manual": "Accu handmatig vermogen (number-entiteit)",
+          "ent_zd_hems": "Accu HEMS/AI-modus status (binary_sensor)",
+          "ent_zd_chg": "Accu laadvermogen sensor (optioneel)",
+          "ent_zd_dis": "Accu ontlaadvermogen sensor (optioneel)"
+        }
+      }
+    }
+  }
+}

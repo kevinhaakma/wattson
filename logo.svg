@@ -1,0 +1,30 @@
+<svg viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="wattsonGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#2FD3FF"/>
+      <stop offset="55%" stop-color="#22C8E0"/>
+      <stop offset="100%" stop-color="#00E5A8"/>
+    </linearGradient>
+    <linearGradient id="wattsonGradSoft" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#2FD3FF" stop-opacity="0.4"/>
+      <stop offset="100%" stop-color="#00E5A8" stop-opacity="0.4"/>
+    </linearGradient>
+    <radialGradient id="wattsonGlow" cx="50%" cy="46%" r="55%">
+      <stop offset="0%" stop-color="#22C8E0" stop-opacity="0.28"/>
+      <stop offset="100%" stop-color="#22C8E0" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <!-- zachte gloed achter het merk -->
+  <circle cx="256" cy="240" r="220" fill="url(#wattsonGlow)"/>
+
+  <!-- batterij-omtrek -->
+  <rect x="106" y="132" width="300" height="248" rx="54" fill="none" stroke="url(#wattsonGrad)" stroke-width="20"/>
+  <rect x="406" y="204" width="42" height="104" rx="14" fill="url(#wattsonGrad)"/>
+
+  <!-- golf: het dynamische prijs-/energieverloop -->
+  <path d="M 140 288 Q 196 236 252 288 T 364 288" fill="none" stroke="url(#wattsonGradSoft)" stroke-width="20" stroke-linecap="round"/>
+
+  <!-- bliksem: directe, slimme sturing -->
+  <path d="M 288 168 L 212 296 L 260 296 L 234 356 L 328 248 L 276 248 Z" fill="url(#wattsonGrad)"/>
+</svg>

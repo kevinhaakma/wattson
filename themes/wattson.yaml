@@ -1,0 +1,71 @@
+# Wattson — Home Assistant thema
+#
+# Installatie: kopieer dit bestand naar <config>/themes/wattson.yaml
+# (of naar de map die je "themes:" folder in configuration.yaml noemt) en
+# selecteer "Wattson" bij Instellingen -> Weergave -> Thema.
+#
+# Donker thema met electric-blue/teal accenten, consistent met het Wattson-logo.
+
+Wattson:
+  # ---------- basis ----------
+  mode: dark
+  primary-color: "#2FD3FF"
+  accent-color: "#00E5A8"
+  dark-primary-color: "#0B2430"
+
+  primary-background-color: "#0B0F14"
+  secondary-background-color: "#121821"
+  card-background-color: "#141C26"
+  clear-background-color: "#0B0F14"
+
+  primary-text-color: "#E8F6FA"
+  secondary-text-color: "#8FA6B2"
+  disabled-text-color: "#4A5A64"
+  divider-color: "#22303C"
+
+  # ---------- ha-card ----------
+  ha-card-background: "var(--card-background-color)"
+  ha-card-border-radius: "16px"
+  ha-card-border-width: "1px"
+  ha-card-border-color: "#22303C"
+  ha-card-box-shadow: "0 2px 10px 0 rgba(0, 0, 0, 0.35)"
+  ha-card-header-color: "var(--primary-text-color)"
+
+  # ---------- app / header ----------
+  app-header-background-color: "#0B0F14"
+  app-header-text-color: "#E8F6FA"
+  app-header-edit-background-color: "#121821"
+
+  # ---------- sidebar ----------
+  sidebar-background-color: "#0B0F14"
+  sidebar-text-color: "#8FA6B2"
+  sidebar-icon-color: "#8FA6B2"
+  sidebar-selected-icon-color: "#2FD3FF"
+  sidebar-selected-text-color: "#2FD3FF"
+  sidebar-border-color: "#22303C"
+
+  # ---------- interactie ----------
+  primary-color-light: "#7AE6FF"
+  accent-color-light: "#5CF0CB"
+  mdc-theme-primary: "var(--primary-color)"
+  switch-checked-color: "#00E5A8"
+  switch-unchecked-color: "#3A4650"
+  slider-color: "#2FD3FF"
+  slider-secondary-color: "#00E5A8"
+  paper-slider-knob-color: "#2FD3FF"
+  paper-slider-active-color: "#2FD3FF"
+
+  # ---------- states / badges ----------
+  state-active-color: "#00E5A8"
+  state-icon-active-color: "#2FD3FF"
+  label-badge-blue: "#2FD3FF"
+  label-badge-green: "#00E5A8"
+  label-badge-red: "#FF5C7A"
+  label-badge-yellow: "#F5C542"
+
+  # ---------- grafieken (o.a. wattson-card) ----------
+  energy-grid-consumption-color: "#2FD3FF"
+  energy-grid-return-color: "#00E5A8"
+  energy-solar-color: "#F5C542"
+  energy-battery-in-color: "#00E5A8"
+  energy-battery-out-color: "#2FD3FF"

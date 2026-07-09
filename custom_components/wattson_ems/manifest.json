@@ -1,0 +1,12 @@
+{
+  "domain": "wattson_ems",
+  "name": "Wattson — slimme thuisaccu",
+  "version": "1.0.0",
+  "config_flow": true,
+  "documentation": "https://github.com/kevinhaakma/wattson",
+  "issue_tracker": "https://github.com/kevinhaakma/wattson/issues",
+  "codeowners": ["@kevin"],
+  "requirements": [],
+  "dependencies": [],
+  "iot_class": "calculated"
+}
