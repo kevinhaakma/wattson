@@ -3,7 +3,10 @@
     "step": {
       "user": {
         "title": "Set up Wattson",
-        "description": "Wattson steers your home battery based on dynamic energy prices using a rolling-horizon planner. Only one instance is needed — configure the source entities afterwards via the Options button."
+        "description": "Wattson steers your home battery based on dynamic energy prices using a rolling-horizon planner. Only one instance is needed — configure the source entities afterwards via the Options button.",
+        "data": {
+          "adapter": "Battery brand (adapter)"
+        }
       }
     },
     "abort": {
@@ -28,7 +31,15 @@
           "ent_zd_manual": "Battery manual power number entity",
           "ent_zd_hems": "Battery HEMS / AI-mode status (binary_sensor)",
           "ent_zd_chg": "Battery charge power sensor (optional)",
-          "ent_zd_dis": "Battery discharge power sensor (optional)"
+          "ent_zd_dis": "Battery discharge power sensor (optional)",
+          "adapter": "Battery brand (adapter)",
+          "ent_gen_power": "Generic: signed power number (+W charge / -W discharge)",
+          "ent_gen_charge": "Generic: charge power number (W)",
+          "ent_gen_discharge": "Generic: discharge power number (W)",
+          "capacity_kwh": "Battery capacity (kWh)",
+          "min_soc_pct": "Minimum SoC (%)",
+          "p_charge_max_w": "Max charge power (W)",
+          "p_discharge_max_w": "Max discharge power (W)"
         }
       }
     }

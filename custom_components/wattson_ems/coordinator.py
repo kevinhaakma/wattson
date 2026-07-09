@@ -22,6 +22,12 @@ from homeassistant.helpers.event import async_track_state_change_event, async_tr
 
 from . import planner as P
 from .const import (
+    ADAPTER_ZENDURE,
+    CONF_ADAPTER,
+    CONF_CAPACITY,
+    CONF_ENT_GEN_CHARGE,
+    CONF_ENT_GEN_DISCHARGE,
+    CONF_ENT_GEN_POWER,
     CONF_ENT_P1,
     CONF_ENT_PRICE,
     CONF_ENT_PV_NOW,
@@ -35,6 +41,9 @@ from .const import (
     CONF_ENT_ZD_HEMS,
     CONF_ENT_ZD_MANUAL,
     CONF_ENT_ZD_OPERATION,
+    CONF_MIN_SOC_PCT,
+    CONF_P_CHARGE,
+    CONF_P_DISCHARGE,
     DAGLICHT,
     DEFAULT_OPTIONS,
     EV_THRESHOLD_KW,
@@ -66,12 +75,23 @@ class WattsonCoordinator:
         self.ent_zd_hems = o(CONF_ENT_ZD_HEMS)
         self.ent_zd_chg = o(CONF_ENT_ZD_CHG)
         self.ent_zd_dis = o(CONF_ENT_ZD_DIS)
+        self.adapter = o(CONF_ADAPTER)
+        self.ent_gen_power = o(CONF_ENT_GEN_POWER)
+        self.ent_gen_charge = o(CONF_ENT_GEN_CHARGE)
+        self.ent_gen_discharge = o(CONF_ENT_GEN_DISCHARGE)
 
         cfg = json.load(open(os.path.join(os.path.dirname(__file__), "params.json"), encoding="utf-8"))
         b = cfg["battery"]
+        cap = float(o(CONF_CAPACITY))
+        min_soc = float(o(CONF_MIN_SOC_PCT)) / 100.0 * cap
+        # actie-niveaus schalen mee met de ingestelde vermogens
+        p_chg = float(o(CONF_P_CHARGE))
+        p_dis = float(o(CONF_P_DISCHARGE))
         self.params = P.Params(
-            capacity_kwh=b["capacity_kwh"], soc_min_kwh=b["soc_min_kwh"], soc_max_kwh=b["soc_max_kwh"],
-            p_charge_max_w=b["p_charge_max_w"], p_discharge_max_w=b["p_discharge_max_w"],
+            capacity_kwh=cap, soc_min_kwh=min_soc, soc_max_kwh=cap,
+            p_charge_max_w=p_chg, p_discharge_max_w=p_dis,
+            charge_levels=tuple(p_chg * i / 4 for i in range(5)),
+            discharge_levels=tuple(p_dis * i / 4 for i in range(5)),
             eta_nom=b["eta_nom"], p_fix_w=b["p_fix_w"], deg_cost=cfg["deg_cost"],
         )
         self.wedge = cfg["wedge"]
@@ -106,6 +126,8 @@ class WattsonCoordinator:
 
     # ---------- helpers ----------
     def _f(self, entity: str) -> float | None:
+        if not entity:
+            return None
         st = self.hass.states.get(entity)
         if st is None or st.state in ("unknown", "unavailable", None):
             return None
@@ -174,7 +196,7 @@ class WattsonCoordinator:
             self.last_error = str(err)
             _LOGGER.exception("Wattson-tick faalde")
             if self.control_enabled:
-                await self._set_zendure("off", 0.0)  # veilige stand
+                await self._set_battery("rust", 0.0)  # veilige stand
         for s in self.sensors:
             s.async_write_ha_state()
 
@@ -255,17 +277,50 @@ class WattsonCoordinator:
 
         if not self.control_enabled:
             return
-        hems = self.hass.states.get(self.ent_zd_hems)
-        if hems is not None and hems.state == "on":
-            # de eigen AI-modus is nog de baas: niet dubbel sturen
-            self.last_applied = "geblokkeerd: accu-AI (HEMS) staat nog aan"
-            return
+        if self.adapter == ADAPTER_ZENDURE and self.ent_zd_hems:
+            hems = self.hass.states.get(self.ent_zd_hems)
+            if hems is not None and hems.state == "on":
+                # de eigen AI-modus is nog de baas: niet dubbel sturen
+                self.last_applied = "geblokkeerd: accu-AI (HEMS) staat nog aan"
+                return
         if self.advies == "laden":
-            await self._set_zendure("manual", -abs(self.setpoint_w))
+            await self._set_battery("laden", abs(self.setpoint_w))
         elif self.advies == "ontladen" and not ev_now:
-            await self._set_zendure("smart_discharging", 0.0)
+            await self._set_battery("ontladen", abs(self.setpoint_w))
         else:
-            await self._set_zendure("off", 0.0)
+            await self._set_battery("rust", 0.0)
+
+    async def _set_battery(self, action: str, power_w: float) -> None:
+        """Adapter-router: vertaal laden/ontladen/rust naar het accumerk."""
+        if self.adapter == ADAPTER_ZENDURE:
+            if action == "laden":
+                await self._set_zendure("manual", -power_w)
+            elif action == "ontladen":
+                # smart_discharging = P1-matching van de Zendure zelf: volgt de
+                # huisvraag en kan dus nooit exporteren
+                await self._set_zendure("smart_discharging", 0.0)
+            else:
+                await self._set_zendure("off", 0.0)
+            return
+        # generiek: number-entiteiten; ontladen wordt begrensd op de actuele
+        # netto-import zodat de accu nooit naar het net exporteert
+        if action == "ontladen":
+            p1 = self._f(self.ent_p1)
+            power_w = min(power_w, max(p1 or 0.0, 0.0))
+        signed = power_w if action == "laden" else (-power_w if action == "ontladen" else 0.0)
+        if self.ent_gen_power:
+            await self.hass.services.async_call(
+                "number", "set_value", {"entity_id": self.ent_gen_power, "value": signed}, blocking=True)
+        else:
+            if self.ent_gen_charge:
+                await self.hass.services.async_call(
+                    "number", "set_value",
+                    {"entity_id": self.ent_gen_charge, "value": max(signed, 0.0)}, blocking=True)
+            if self.ent_gen_discharge:
+                await self.hass.services.async_call(
+                    "number", "set_value",
+                    {"entity_id": self.ent_gen_discharge, "value": max(-signed, 0.0)}, blocking=True)
+        self.last_applied = f"{action} ({signed:+.0f} W, generiek)"
 
     async def _set_zendure(self, mode: str, manual_w: float) -> None:
         cur = self.hass.states.get(self.ent_zd_operation)
@@ -281,7 +336,7 @@ class WattsonCoordinator:
     def _ev_guard(self, _event) -> None:
         """Auto begint te laden -> ontladen direct stoppen."""
         if self.control_enabled and self.advies == "ontladen" and self._ev_charging():
-            self.hass.async_create_task(self._set_zendure("off", 0.0))
+            self.hass.async_create_task(self._set_battery("rust", 0.0))
             self.advies = "rust (EV-guard)"
             for s in self.sensors:
                 s.async_write_ha_state()

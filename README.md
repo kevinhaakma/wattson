@@ -7,7 +7,7 @@
 **Slimme thuisaccu-sturing voor Home Assistant**
 
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-2FD3FF.svg?style=for-the-badge)](https://github.com/hacs/integration)
-[![version](https://img.shields.io/badge/version-1.0.0-00E5A8.svg?style=for-the-badge)](#)
+[![version](https://img.shields.io/badge/version-1.1.0-00E5A8.svg?style=for-the-badge)](#)
 [![license](https://img.shields.io/badge/license-MIT-2FD3FF.svg?style=for-the-badge)](#)
 [![maintained](https://img.shields.io/badge/maintained-yes-00E5A8.svg?style=for-the-badge)](#)
 
@@ -139,3 +139,20 @@ of correcte werking van gekoppelde apparaten.
 <div align="center">
 <sub>Gebouwd met een pure-Python rolling-horizon planner — geen cloud, geen dependencies.</sub>
 </div>
+
+
+## Andere accumerken (v1.1)
+
+Wattson is merk-onafhankelijk. Bij het toevoegen kies je een **adapter**:
+
+- **zendure** — stuurt de [Zendure-HA-integratie](https://github.com/FireSon/Zendure-HA) aan
+  (manual/smart_discharging/off; ontladen via de P1-matching van het apparaat zelf).
+- **generic** — werkt met elk merk dat via een integratie `number`-entiteiten aanbiedt:
+  - één *signed* vermogen-number (+W = laden, −W = ontladen), **of**
+  - twee losse numbers (laadvermogen en ontlaadvermogen).
+
+  Wattson begrenst ontladen op de actuele netto-import (P1) zodat de accu nooit naar
+  het net exporteert; zet daarnaast in de accu-app zelf een export-limiet als die er is.
+
+Accucapaciteit, minimale SoC en maximale laad-/ontlaadvermogens stel je in via
+**Opties** op de integratie — de planner schaalt daar automatisch op mee.

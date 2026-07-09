@@ -41,4 +41,4 @@ class WattsonControlSwitch(SwitchEntity, RestoreEntity):
         self._attr_is_on = False
         self.async_write_ha_state()
         # bij uitzetten: accu in veilige ruststand
-        await self.coordinator._set_zendure("off", 0.0)
+        await self.coordinator._set_battery("rust", 0.0)

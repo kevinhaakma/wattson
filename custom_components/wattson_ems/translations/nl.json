@@ -3,7 +3,10 @@
     "step": {
       "user": {
         "title": "Wattson instellen",
-        "description": "Wattson stuurt je thuisaccu op basis van dynamische energieprijzen met een rolling-horizon planner. Er is maar één instantie nodig — de bron-entiteiten stel je hierna in via de Opties-knop."
+        "description": "Wattson stuurt je thuisaccu op basis van dynamische energieprijzen met een rolling-horizon planner. Er is maar één instantie nodig — de bron-entiteiten stel je hierna in via de Opties-knop.",
+        "data": {
+          "adapter": "Accumerk (adapter)"
+        }
       }
     },
     "abort": {
@@ -28,7 +31,15 @@
           "ent_zd_manual": "Accu handmatig vermogen (number-entiteit)",
           "ent_zd_hems": "Accu HEMS/AI-modus status (binary_sensor)",
           "ent_zd_chg": "Accu laadvermogen sensor (optioneel)",
-          "ent_zd_dis": "Accu ontlaadvermogen sensor (optioneel)"
+          "ent_zd_dis": "Accu ontlaadvermogen sensor (optioneel)",
+          "adapter": "Accumerk (adapter)",
+          "ent_gen_power": "Generiek: signed vermogen-number (+W laden / -W ontladen)",
+          "ent_gen_charge": "Generiek: laadvermogen-number (W)",
+          "ent_gen_discharge": "Generiek: ontlaadvermogen-number (W)",
+          "capacity_kwh": "Accucapaciteit (kWh)",
+          "min_soc_pct": "Minimale SoC (%)",
+          "p_charge_max_w": "Max laadvermogen (W)",
+          "p_discharge_max_w": "Max ontlaadvermogen (W)"
         }
       }
     }

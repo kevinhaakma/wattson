@@ -18,6 +18,23 @@ CONF_ENT_ZD_HEMS = "ent_zd_hems"
 CONF_ENT_ZD_CHG = "ent_zd_chg"
 CONF_ENT_ZD_DIS = "ent_zd_dis"
 
+# ---------- adapter (accumerk) ----------
+CONF_ADAPTER = "adapter"
+ADAPTER_ZENDURE = "zendure"
+ADAPTER_GENERIC = "generic"
+ADAPTERS = [ADAPTER_ZENDURE, ADAPTER_GENERIC]
+
+# generieke adapter: number-entiteiten waarmee elk accumerk aanstuurbaar is
+CONF_ENT_GEN_POWER = "ent_gen_power"          # één signed number: +W laden / -W ontladen
+CONF_ENT_GEN_CHARGE = "ent_gen_charge"        # of twee losse numbers
+CONF_ENT_GEN_DISCHARGE = "ent_gen_discharge"
+
+# accu-eigenschappen (instelbaar per installatie)
+CONF_CAPACITY = "capacity_kwh"
+CONF_MIN_SOC_PCT = "min_soc_pct"
+CONF_P_CHARGE = "p_charge_max_w"
+CONF_P_DISCHARGE = "p_discharge_max_w"
+
 # ---------- defaults: de huidige entity-ids op deze installatie ----------
 DEFAULT_ENT_PRICE = "sensor.zonneplan_current_electricity_tariff"
 DEFAULT_ENT_SOC = "sensor.solarflow_2400_ac_electric_level"
@@ -47,6 +64,14 @@ DEFAULT_OPTIONS = {
     CONF_ENT_ZD_HEMS: DEFAULT_ENT_ZD_HEMS,
     CONF_ENT_ZD_CHG: DEFAULT_ENT_ZD_CHG,
     CONF_ENT_ZD_DIS: DEFAULT_ENT_ZD_DIS,
+    CONF_ADAPTER: ADAPTER_ZENDURE,
+    CONF_ENT_GEN_POWER: "",
+    CONF_ENT_GEN_CHARGE: "",
+    CONF_ENT_GEN_DISCHARGE: "",
+    CONF_CAPACITY: 5.76,
+    CONF_MIN_SOC_PCT: 10,
+    CONF_P_CHARGE: 1600,
+    CONF_P_DISCHARGE: 800,
 }
 
 EV_THRESHOLD_KW = 0.5      # daarboven telt als "auto laadt"
