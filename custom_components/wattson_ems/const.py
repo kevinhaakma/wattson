@@ -85,6 +85,13 @@ DEFAULT_OPTIONS = {
 }
 
 EV_THRESHOLD_KW = 0.5      # daarboven telt als "auto laadt"
+
+# dynamisch bijspringen (realtime laag bovenop het uurplan)
+ASSIST_IMPORT_W = 400      # huis-import waarboven piek-assist mag starten
+ASSIST_EXPORT_W = 300      # export waarboven overschot-assist mag starten
+ASSIST_STOP_W = 150        # hysterese: daaronder stopt de assist
+ASSIST_THROTTLE_S = 30     # minimale tijd tussen assist-beslissingen
+ASSIST_SOC_MARGE_KWH = 0.15
 UPDATE_MINUTES = 5         # her-plan interval
 DAGLICHT = (7, 21)         # uren waarbinnen de PV-bel wordt verdeeld
 

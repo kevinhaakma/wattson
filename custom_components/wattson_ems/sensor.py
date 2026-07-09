@@ -39,6 +39,8 @@ class WattsonAdviesSensor(SensorEntity):
             "berekend_met": c.inputs,
             "reden": c.reden,
             "volgende_actie": c.volgende_actie,
+            "bijspringen": c.assist_active or ("stand-by" if c.assist_enabled else "uit"),
+            "reserve_kwh": round(c.reserve_kwh, 2),
             "historie": list(c.history),
             "agressiviteit": c.aggressiveness,
             "sturing_actief": c.control_enabled,

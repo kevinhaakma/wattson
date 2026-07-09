@@ -28,6 +28,11 @@ from homeassistant.helpers.event import (
 from . import planner as P
 from .const import (
     ADAPTER_MARSTEK,
+    ASSIST_EXPORT_W,
+    ASSIST_IMPORT_W,
+    ASSIST_SOC_MARGE_KWH,
+    ASSIST_STOP_W,
+    ASSIST_THROTTLE_S,
     ADAPTER_ZENDURE,
     CONF_ADAPTER,
     CONF_CAPACITY,
@@ -112,6 +117,12 @@ class WattsonCoordinator:
         self.trained_at = cfg["trained_at"]
 
         self.control_enabled = False   # master-switch (RestoreEntity zet dit terug)
+        self.assist_enabled = False    # dynamisch bijspringen (aparte switch)
+        self.assist_active: str | None = None
+        self.reserve_kwh = 0.0
+        self._cheap_future = 0.0
+        self._max_future = 0.0
+        self._assist_last = 0.0
         self.aggressiveness = "gebalanceerd"
         self.advies = "init"
         self.setpoint_w = 0.0
@@ -134,6 +145,9 @@ class WattsonCoordinator:
             self.hass, self._tick, timedelta(minutes=UPDATE_MINUTES)))
         self.listeners.append(async_track_state_change_event(
             self.hass, [self.ent_wallbox_1, self.ent_wallbox_2], self._ev_guard))
+        if self.ent_p1:
+            self.listeners.append(async_track_state_change_event(
+                self.hass, [self.ent_p1], self._assist_check))
         await self._tick(None)
 
     async def async_stop(self) -> None:
@@ -300,6 +314,13 @@ class WattsonCoordinator:
             "eindwaarde_restlading": round(tv, 3),
         }
         setpoints, cost = P.plan(steps, soc, self.params, terminal_value=tv)
+        prices_only = [s2.price_imp for s2 in steps]
+        self._cheap_future = min(prices_only)
+        self._max_future = max(prices_only)
+        # reserve: wat het plan later nog wil ontladen (accu-zijde kWh);
+        # bijspringen mag alleen boven deze reserve
+        eta = P.eta_oneway(self.params.p_discharge_max_w, self.params) or 1.0
+        self.reserve_kwh = sum(-sp for sp in setpoints[1:] if sp < 0) / 1000.0 / eta
         # kosten zonder accu over dezelfde horizon (voor het besparing-sensor)
         base = 0.0
         for s in steps:
@@ -350,16 +371,25 @@ class WattsonCoordinator:
                 self.last_applied = "geblokkeerd: accu-AI (HEMS) staat nog aan"
                 return
         if self.advies == "laden":
+            self.assist_active = None
             await self._set_battery("laden", abs(self.setpoint_w))
         elif self.advies == "ontladen" and not ev_now:
+            self.assist_active = None
             await self._set_battery("ontladen", abs(self.setpoint_w))
+        elif self.assist_active:
+            pass  # bijspringen loopt; de P1-listener beheert dit
         else:
             await self._set_battery("rust", 0.0)
 
     async def _set_battery(self, action: str, power_w: float) -> None:
         """Adapter-router: vertaal laden/ontladen/rust naar het accumerk."""
+        if action == "laden_overschot" and self.adapter != ADAPTER_ZENDURE:
+            action = "laden"  # alleen zendure heeft een native overschot-modus
         if self.adapter == ADAPTER_ZENDURE:
-            if action == "laden":
+            if action == "laden_overschot":
+                # MATCHING_CHARGE: het apparaat volgt het overschot zelf op P1
+                await self._set_zendure("smart_charging", 0.0)
+            elif action == "laden":
                 await self._set_zendure("manual", -power_w)
             elif action == "ontladen":
                 # smart_discharging = P1-matching van de Zendure zelf: volgt de
@@ -435,9 +465,65 @@ class WattsonCoordinator:
         self.last_applied = f"{mode} ({manual_w:+.0f} W)" if mode == "manual" else mode
 
     @callback
+    def _assist_check(self, _event) -> None:
+        """Realtime laag: bijspringen op pieken en zonoverschot (throttled)."""
+        import time
+        if not (self.control_enabled and self.assist_enabled):
+            return
+        if self.advies not in ("rust", "rust (EV-guard)") and not self.assist_active:
+            return
+        now = time.monotonic()
+        if now - self._assist_last < ASSIST_THROTTLE_S:
+            return
+        self._assist_last = now
+        self.hass.async_create_task(self._assist_apply())
+
+    async def _assist_apply(self) -> None:
+        p1 = self._f(self.ent_p1)
+        soc_pct = self._f(self.ent_soc)
+        prijs = self._f(self.ent_price)
+        if p1 is None or soc_pct is None or prijs is None:
+            return
+        soc = soc_pct / 100.0 * self.params.capacity_kwh
+        vrij = soc - self.params.soc_min_kwh - self.reserve_kwh - ASSIST_SOC_MARGE_KWH
+        eta_rt = P.eta_oneway(800.0, self.params) ** 2
+        prev = (self.advies, self.last_applied)
+
+        if self.assist_active == "ontladen" and (p1 < ASSIST_STOP_W or vrij <= 0 or self._ev_charging()):
+            self.assist_active = None
+            await self._set_battery("rust", 0.0)
+            self.advies = "rust"
+            self.reden = "bijspringen klaar (piek voorbij of reserve bereikt)"
+        elif self.assist_active == "laden" and p1 > -ASSIST_STOP_W:
+            self.assist_active = None
+            await self._set_battery("rust", 0.0)
+            self.advies = "rust"
+            self.reden = "bijspringen klaar (overschot voorbij)"
+        elif (self.assist_active in (None, "ontladen") and p1 > ASSIST_IMPORT_W
+              and not self._ev_charging() and vrij > 0
+              and prijs > self._cheap_future / max(eta_rt, 0.5)):
+            self.assist_active = "ontladen"
+            await self._set_battery("ontladen", min(p1, self.params.p_discharge_max_w))
+            self.advies = "bijspringen: ontladen"
+            self.reden = f"piek {p1:.0f} W, prijs €{prijs:.3f} > herlaadprijs"
+        elif (self.assist_active in (None, "laden") and p1 < -ASSIST_EXPORT_W
+              and soc < self.params.soc_max_kwh - 0.2
+              and self._max_future * eta_rt > prijs):
+            self.assist_active = "laden"
+            await self._set_battery("laden_overschot", min(-p1, self.params.p_charge_max_w))
+            self.advies = "bijspringen: laden"
+            self.reden = f"zonoverschot {-p1:.0f} W, piek later €{self._max_future:.3f}"
+        else:
+            return
+        self._log_decision(prev)
+        for s in self.sensors:
+            s.async_write_ha_state()
+
+    @callback
     def _ev_guard(self, _event) -> None:
         """Auto begint te laden -> ontladen direct stoppen."""
-        if self.control_enabled and self.advies == "ontladen" and self._ev_charging():
+        if self.control_enabled and self._ev_charging() and (self.advies == "ontladen" or self.assist_active == "ontladen"):
+            self.assist_active = None
             self.hass.async_create_task(self._set_battery("rust", 0.0))
             self.advies = "rust (EV-guard)"
             for s in self.sensors:

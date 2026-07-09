@@ -7,7 +7,7 @@
 **Slimme thuisaccu-sturing voor Home Assistant**
 
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-2FD3FF.svg?style=for-the-badge)](https://github.com/hacs/integration)
-[![version](https://img.shields.io/badge/version-1.3.0-00E5A8.svg?style=for-the-badge)](#)
+[![version](https://img.shields.io/badge/version-1.4.0-00E5A8.svg?style=for-the-badge)](#)
 [![license](https://img.shields.io/badge/license-MIT-2FD3FF.svg?style=for-the-badge)](#)
 [![maintained](https://img.shields.io/badge/maintained-yes-00E5A8.svg?style=for-the-badge)](#)
 
@@ -175,3 +175,17 @@ Accucapaciteit, minimale SoC en maximale laad-/ontlaadvermogens stel je in via
 - Na een herstart probeert Wattson elke 45 s opnieuw tot de bronnen (prijs/SoC)
   beschikbaar zijn, in plaats van 5 minuten te wachten.
 - Alle bron-entiteiten kies je nu uit een **dropdown** in plaats van een tekstveld.
+
+
+## Dynamisch bijspringen (v1.4)
+
+Met `switch.wattson_bijspringen` aan reageert Wattson realtime (elke ~30 s) bovenop het uurplan:
+
+- **Piek-assist**: schiet het huisverbruik omhoog terwijl het plan "rust" zegt, dan ontlaadt
+  de accu mee — maar alleen als de huidige prijs hoger is dan de goedkoopste herlaadprijs
+  (round-trip meegerekend) én de **plan-reserve** onaangetast blijft: energie die het plan
+  voor de avondpiek heeft gereserveerd wordt nooit opgesnoept.
+- **Overschot-assist**: is er PV-overschot, dan wordt dat direct opgeslagen zolang een
+  duurder uur in het verschiet ligt (bij Zendure via de native surplus-modus die het
+  overschot op de P1 volgt).
+- EV-guard blijft altijd voorrang houden; hysterese voorkomt aan/uit-gependel.
