@@ -17,6 +17,8 @@ CONF_ENT_ZD_MANUAL = "ent_zd_manual"
 CONF_ENT_ZD_HEMS = "ent_zd_hems"
 CONF_ENT_ZD_CHG = "ent_zd_chg"
 CONF_ENT_ZD_DIS = "ent_zd_dis"
+CONF_ENT_ZD_INLIM = "ent_zd_inlim"    # number.*_input_limit (max laadvermogen)
+CONF_ENT_ZD_OUTLIM = "ent_zd_outlim"  # number.*_output_limit (max ontlaadvermogen)
 
 # ---------- adapter (accumerk) ----------
 CONF_ADAPTER = "adapter"
@@ -56,6 +58,8 @@ DEFAULT_ENT_ZD_MANUAL = "number.zendure_manager_manual_power"
 DEFAULT_ENT_ZD_HEMS = "binary_sensor.solarflow_2400_ac_hems_state"
 DEFAULT_ENT_ZD_CHG = "sensor.solarflow_2400_ac_grid_input_power"
 DEFAULT_ENT_ZD_DIS = "sensor.solarflow_2400_ac_output_home_power"
+DEFAULT_ENT_ZD_INLIM = "number.solarflow_2400_ac_input_limit"
+DEFAULT_ENT_ZD_OUTLIM = "number.solarflow_2400_ac_output_limit"
 
 DEFAULT_OPTIONS = {
     CONF_ENT_PRICE: DEFAULT_ENT_PRICE,
@@ -71,6 +75,8 @@ DEFAULT_OPTIONS = {
     CONF_ENT_ZD_HEMS: DEFAULT_ENT_ZD_HEMS,
     CONF_ENT_ZD_CHG: DEFAULT_ENT_ZD_CHG,
     CONF_ENT_ZD_DIS: DEFAULT_ENT_ZD_DIS,
+    CONF_ENT_ZD_INLIM: DEFAULT_ENT_ZD_INLIM,
+    CONF_ENT_ZD_OUTLIM: DEFAULT_ENT_ZD_OUTLIM,
     CONF_ADAPTER: ADAPTER_ZENDURE,
     CONF_ENT_GEN_POWER: "",
     CONF_ENT_GEN_CHARGE: "",

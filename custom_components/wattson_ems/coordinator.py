@@ -53,8 +53,10 @@ from .const import (
     CONF_ENT_ZD_CHG,
     CONF_ENT_ZD_DIS,
     CONF_ENT_ZD_HEMS,
+    CONF_ENT_ZD_INLIM,
     CONF_ENT_ZD_MANUAL,
     CONF_ENT_ZD_OPERATION,
+    CONF_ENT_ZD_OUTLIM,
     CONF_MIN_SOC_PCT,
     CONF_P_CHARGE,
     CONF_P_DISCHARGE,
@@ -89,6 +91,8 @@ class WattsonCoordinator:
         self.ent_zd_hems = o(CONF_ENT_ZD_HEMS)
         self.ent_zd_chg = o(CONF_ENT_ZD_CHG)
         self.ent_zd_dis = o(CONF_ENT_ZD_DIS)
+        self.ent_zd_inlim = o(CONF_ENT_ZD_INLIM)
+        self.ent_zd_outlim = o(CONF_ENT_ZD_OUTLIM)
         self.adapter = o(CONF_ADAPTER)
         self.ent_gen_power = o(CONF_ENT_GEN_POWER)
         self.ent_gen_charge = o(CONF_ENT_GEN_CHARGE)
@@ -119,6 +123,7 @@ class WattsonCoordinator:
         self.control_enabled = False   # master-switch (RestoreEntity zet dit terug)
         self.assist_enabled = False    # dynamisch bijspringen (aparte switch)
         self.assist_active: str | None = None
+        self._tripped = False
         self.reserve_kwh = 0.0
         self._cheap_future = 0.0
         self._max_future = 0.0
@@ -258,20 +263,29 @@ class WattsonCoordinator:
         elif dis > self.params.p_discharge_max_w + 500:
             afwijking = f"ontlaadvermogen {dis:.0f} W ver boven limiet"
         if afwijking:
+            self._tripped = True
             self.assist_active = None
             await self._set_zendure("off", 0.0)
-            if self.adapter == ADAPTER_ZENDURE:
-                # ook op apparaatniveau dichtzetten
-                for ent, val in (("number.solarflow_2400_ac_output_limit", 0),):
-                    try:
-                        await self.hass.services.async_call(
-                            "number", "set_value", {"entity_id": ent, "value": val}, blocking=True)
-                    except Exception:  # noqa: BLE001
-                        pass
+            if self.adapter == ADAPTER_ZENDURE and self.ent_zd_outlim:
+                # ook op apparaatniveau dichtzetten (cloud kan traag zijn)
+                try:
+                    await self.hass.services.async_call(
+                        "number", "set_value",
+                        {"entity_id": self.ent_zd_outlim, "value": 0}, blocking=True)
+                except Exception:  # noqa: BLE001
+                    pass
             self.last_error = f"WATCHDOG: {afwijking}"
             _LOGGER.warning("Wattson watchdog: %s", afwijking)
             self.hass.bus.async_fire("logbook_entry", {
                 "name": "Wattson", "message": f"WATCHDOG ingegrepen: {afwijking}",
+                "entity_id": "sensor.wattson_advies", "domain": "wattson_ems"})
+        elif self._tripped:
+            # runaway is voorbij: blokkade opheffen zodat normale sturing hervat
+            self._tripped = False
+            self.last_error = None
+            await self._restore_limits()
+            self.hass.bus.async_fire("logbook_entry", {
+                "name": "Wattson", "message": "WATCHDOG opgeheven, sturing hervat",
                 "entity_id": "sensor.wattson_advies", "domain": "wattson_ems"})
 
     async def _retry(self, _now) -> None:
@@ -396,7 +410,7 @@ class WattsonCoordinator:
                 self.reden = "spread te klein binnen de horizon"
                 self.volgende_actie = None
 
-        if not self.control_enabled:
+        if not self.control_enabled or self._tripped:
             return
         if self.adapter == ADAPTER_ZENDURE and self.ent_zd_hems:
             hems = self.hass.states.get(self.ent_zd_hems)
@@ -488,11 +502,27 @@ class WattsonCoordinator:
                 "number", "set_value", {"entity_id": self.ent_ms_mode, "value": mode_idx}, blocking=True)
         self.last_applied = f"{action} ({power_w:.0f} W, marstek)"
 
+    async def _num(self, entity, value):
+        if entity:
+            await self.hass.services.async_call(
+                "number", "set_value", {"entity_id": entity, "value": value}, blocking=True)
+
+    async def _restore_limits(self):
+        """Zet input/output-limieten terug op nominaal (wist een emergency-0)."""
+        await self._num(self.ent_zd_inlim, self.params.p_charge_max_w)
+        await self._num(self.ent_zd_outlim, self.params.p_discharge_max_w)
+
     async def _set_zendure(self, mode: str, manual_w: float) -> None:
+        # zonder tripped: zorg dat de apparaatlimieten open staan voor de gevraagde
+        # richting (anders blokkeert een eerdere emergency-0 de sturing stil)
+        if not self._tripped:
+            if mode in ("manual", "smart_charging", "store_solar"):
+                await self._num(self.ent_zd_inlim, self.params.p_charge_max_w)
+            if mode in ("smart_discharging", "manual", "smart"):
+                await self._num(self.ent_zd_outlim, self.params.p_discharge_max_w)
         cur = self.hass.states.get(self.ent_zd_operation)
         if mode == "manual":
-            await self.hass.services.async_call(
-                "number", "set_value", {"entity_id": self.ent_zd_manual, "value": manual_w}, blocking=True)
+            await self._num(self.ent_zd_manual, manual_w)
         if cur is None or cur.state != mode:
             await self.hass.services.async_call(
                 "select", "select_option", {"entity_id": self.ent_zd_operation, "option": mode}, blocking=True)
