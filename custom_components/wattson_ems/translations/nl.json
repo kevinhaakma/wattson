@@ -39,7 +39,10 @@
           "capacity_kwh": "Accucapaciteit (kWh)",
           "min_soc_pct": "Minimale SoC (%)",
           "p_charge_max_w": "Max laadvermogen (W)",
-          "p_discharge_max_w": "Max ontlaadvermogen (W)"
+          "p_discharge_max_w": "Max ontlaadvermogen (W)",
+          "ent_ms_mode": "Marstek: force-mode entity (select of number, 0=stop/1=laden/2=ontladen)",
+          "ent_ms_charge": "Marstek: forcible laadvermogen-number (W)",
+          "ent_ms_discharge": "Marstek: forcible ontlaadvermogen-number (W)"
         }
       }
     }

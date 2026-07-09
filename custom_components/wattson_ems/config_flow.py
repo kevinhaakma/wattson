@@ -13,6 +13,7 @@ from homeassistant.core import callback
 
 from .const import (
     ADAPTER_GENERIC,
+    ADAPTER_MARSTEK,
     ADAPTER_ZENDURE,
     ADAPTERS,
     CONF_ADAPTER,
@@ -20,6 +21,9 @@ from .const import (
     CONF_ENT_GEN_CHARGE,
     CONF_ENT_GEN_DISCHARGE,
     CONF_ENT_GEN_POWER,
+    CONF_ENT_MS_CHARGE,
+    CONF_ENT_MS_DISCHARGE,
+    CONF_ENT_MS_MODE,
     CONF_ENT_P1,
     CONF_ENT_PRICE,
     CONF_ENT_PV_NOW,
@@ -68,6 +72,12 @@ def _schema(options: dict) -> vol.Schema:
             vol.Optional(CONF_ENT_ZD_HEMS, default=d(CONF_ENT_ZD_HEMS)): str,
             vol.Optional(CONF_ENT_ZD_CHG, default=d(CONF_ENT_ZD_CHG)): str,
             vol.Optional(CONF_ENT_ZD_DIS, default=d(CONF_ENT_ZD_DIS)): str,
+        })
+    elif adapter == ADAPTER_MARSTEK:
+        fields.update({
+            vol.Required(CONF_ENT_MS_MODE, default=d(CONF_ENT_MS_MODE)): str,
+            vol.Required(CONF_ENT_MS_CHARGE, default=d(CONF_ENT_MS_CHARGE)): str,
+            vol.Required(CONF_ENT_MS_DISCHARGE, default=d(CONF_ENT_MS_DISCHARGE)): str,
         })
     else:
         fields.update({

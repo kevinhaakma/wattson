@@ -22,12 +22,19 @@ CONF_ENT_ZD_DIS = "ent_zd_dis"
 CONF_ADAPTER = "adapter"
 ADAPTER_ZENDURE = "zendure"
 ADAPTER_GENERIC = "generic"
-ADAPTERS = [ADAPTER_ZENDURE, ADAPTER_GENERIC]
+ADAPTER_MARSTEK = "marstek"
+ADAPTERS = [ADAPTER_ZENDURE, ADAPTER_MARSTEK, ADAPTER_GENERIC]
 
 # generieke adapter: number-entiteiten waarmee elk accumerk aanstuurbaar is
 CONF_ENT_GEN_POWER = "ent_gen_power"          # één signed number: +W laden / -W ontladen
 CONF_ENT_GEN_CHARGE = "ent_gen_charge"        # of twee losse numbers
 CONF_ENT_GEN_DISCHARGE = "ent_gen_discharge"
+
+# marstek venus (esp32/modbus): force-mode + forcible charge/discharge power.
+# mode-entity mag een select (opties stop/charge/discharge) of number (0/1/2) zijn.
+CONF_ENT_MS_MODE = "ent_ms_mode"
+CONF_ENT_MS_CHARGE = "ent_ms_charge"
+CONF_ENT_MS_DISCHARGE = "ent_ms_discharge"
 
 # accu-eigenschappen (instelbaar per installatie)
 CONF_CAPACITY = "capacity_kwh"
@@ -68,6 +75,9 @@ DEFAULT_OPTIONS = {
     CONF_ENT_GEN_POWER: "",
     CONF_ENT_GEN_CHARGE: "",
     CONF_ENT_GEN_DISCHARGE: "",
+    CONF_ENT_MS_MODE: "",
+    CONF_ENT_MS_CHARGE: "",
+    CONF_ENT_MS_DISCHARGE: "",
     CONF_CAPACITY: 5.76,
     CONF_MIN_SOC_PCT: 10,
     CONF_P_CHARGE: 1600,

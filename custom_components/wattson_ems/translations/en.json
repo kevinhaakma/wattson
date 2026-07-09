@@ -39,7 +39,10 @@
           "capacity_kwh": "Battery capacity (kWh)",
           "min_soc_pct": "Minimum SoC (%)",
           "p_charge_max_w": "Max charge power (W)",
-          "p_discharge_max_w": "Max discharge power (W)"
+          "p_discharge_max_w": "Max discharge power (W)",
+          "ent_ms_mode": "Marstek: force mode entity (select or number, 0=stop/1=charge/2=discharge)",
+          "ent_ms_charge": "Marstek: forcible charge power number (W)",
+          "ent_ms_discharge": "Marstek: forcible discharge power number (W)"
         }
       }
     }

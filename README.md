@@ -7,7 +7,7 @@
 **Slimme thuisaccu-sturing voor Home Assistant**
 
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-2FD3FF.svg?style=for-the-badge)](https://github.com/hacs/integration)
-[![version](https://img.shields.io/badge/version-1.1.0-00E5A8.svg?style=for-the-badge)](#)
+[![version](https://img.shields.io/badge/version-1.2.0-00E5A8.svg?style=for-the-badge)](#)
 [![license](https://img.shields.io/badge/license-MIT-2FD3FF.svg?style=for-the-badge)](#)
 [![maintained](https://img.shields.io/badge/maintained-yes-00E5A8.svg?style=for-the-badge)](#)
 
@@ -141,12 +141,20 @@ of correcte werking van gekoppelde apparaten.
 </div>
 
 
-## Andere accumerken (v1.1)
+## Andere accumerken (v1.1+)
 
 Wattson is merk-onafhankelijk. Bij het toevoegen kies je een **adapter**:
 
 - **zendure** — stuurt de [Zendure-HA-integratie](https://github.com/FireSon/Zendure-HA) aan
   (manual/smart_discharging/off; ontladen via de P1-matching van het apparaat zelf).
+- **marstek** — voor een Marstek Venus E/A/D via RS485-modbus (bijv. een ESP32 met de
+  [LilyGO-ESPHome-config](https://github.com/whyisthisbroken/marstek-lilygo-rs485) of de
+  [HA-modbus-config](https://github.com/reschcloud/marstek_venus_e_modbus_home_assistant)).
+  Je geeft drie entiteiten op: de force-mode (een `select` met stop/charge/discharge-opties
+  óf een `number` op register 42010: 0=stop, 1=laden, 2=ontladen), het forcible-laadvermogen
+  en het forcible-ontlaadvermogen. Let op: de **RS485 control mode** van de Venus moet aan
+  staan, anders accepteert hij geen commando's. Ontladen wordt door Wattson begrensd op de
+  actuele netto-import (P1).
 - **generic** — werkt met elk merk dat via een integratie `number`-entiteiten aanbiedt:
   - één *signed* vermogen-number (+W = laden, −W = ontladen), **of**
   - twee losse numbers (laadvermogen en ontlaadvermogen).

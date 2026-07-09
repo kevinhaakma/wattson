@@ -22,12 +22,16 @@ from homeassistant.helpers.event import async_track_state_change_event, async_tr
 
 from . import planner as P
 from .const import (
+    ADAPTER_MARSTEK,
     ADAPTER_ZENDURE,
     CONF_ADAPTER,
     CONF_CAPACITY,
     CONF_ENT_GEN_CHARGE,
     CONF_ENT_GEN_DISCHARGE,
     CONF_ENT_GEN_POWER,
+    CONF_ENT_MS_CHARGE,
+    CONF_ENT_MS_DISCHARGE,
+    CONF_ENT_MS_MODE,
     CONF_ENT_P1,
     CONF_ENT_PRICE,
     CONF_ENT_PV_NOW,
@@ -79,6 +83,9 @@ class WattsonCoordinator:
         self.ent_gen_power = o(CONF_ENT_GEN_POWER)
         self.ent_gen_charge = o(CONF_ENT_GEN_CHARGE)
         self.ent_gen_discharge = o(CONF_ENT_GEN_DISCHARGE)
+        self.ent_ms_mode = o(CONF_ENT_MS_MODE)
+        self.ent_ms_charge = o(CONF_ENT_MS_CHARGE)
+        self.ent_ms_discharge = o(CONF_ENT_MS_DISCHARGE)
 
         cfg = json.load(open(os.path.join(os.path.dirname(__file__), "params.json"), encoding="utf-8"))
         b = cfg["battery"]
@@ -302,6 +309,9 @@ class WattsonCoordinator:
             else:
                 await self._set_zendure("off", 0.0)
             return
+        if self.adapter == ADAPTER_MARSTEK:
+            await self._set_marstek(action, power_w)
+            return
         # generiek: number-entiteiten; ontladen wordt begrensd op de actuele
         # netto-import zodat de accu nooit naar het net exporteert
         if action == "ontladen":
@@ -321,6 +331,39 @@ class WattsonCoordinator:
                     "number", "set_value",
                     {"entity_id": self.ent_gen_discharge, "value": max(-signed, 0.0)}, blocking=True)
         self.last_applied = f"{action} ({signed:+.0f} W, generiek)"
+
+    async def _set_marstek(self, action: str, power_w: float) -> None:
+        """Marstek Venus (ESP32/modbus): force-mode + forcible charge/discharge power.
+
+        De mode-entity is een select (opties met 'stop/charge/discharge' in de
+        naam, zoals de LilyGO-ESPHome-config) of een number (register 42010:
+        0=stop, 1=charge, 2=discharge, zoals de HA-modbus-config).
+        """
+        if action == "ontladen":
+            p1 = self._f(self.ent_p1)
+            power_w = min(power_w, max(p1 or 0.0, 0.0))
+        # eerst het vermogen zetten, dan de mode (volgorde die het apparaat verwacht)
+        if action == "laden" and self.ent_ms_charge:
+            await self.hass.services.async_call(
+                "number", "set_value", {"entity_id": self.ent_ms_charge, "value": power_w}, blocking=True)
+        if action == "ontladen" and self.ent_ms_discharge:
+            await self.hass.services.async_call(
+                "number", "set_value", {"entity_id": self.ent_ms_discharge, "value": power_w}, blocking=True)
+        mode_idx = {"laden": 1, "ontladen": 2}.get(action, 0)
+        if self.ent_ms_mode.startswith("select."):
+            st = self.hass.states.get(self.ent_ms_mode)
+            options = (st.attributes.get("options") if st else None) or []
+            want = {0: ("stop", "none", "off"), 1: ("charge",), 2: ("discharge",)}[mode_idx]
+            # 'discharge' bevat 'charge', dus match op de meest specifieke eerst
+            option = next((o2 for o2 in options if any(w == o2.lower() or (w in o2.lower() and not (w == "charge" and "discharge" in o2.lower())) for w in want)), None)
+            if option is None:
+                raise RuntimeError(f"geen passende optie voor '{action}' in {options}")
+            await self.hass.services.async_call(
+                "select", "select_option", {"entity_id": self.ent_ms_mode, "option": option}, blocking=True)
+        else:
+            await self.hass.services.async_call(
+                "number", "set_value", {"entity_id": self.ent_ms_mode, "value": mode_idx}, blocking=True)
+        self.last_applied = f"{action} ({power_w:.0f} W, marstek)"
 
     async def _set_zendure(self, mode: str, manual_w: float) -> None:
         cur = self.hass.states.get(self.ent_zd_operation)
