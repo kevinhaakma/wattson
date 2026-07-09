@@ -14,11 +14,16 @@ import json
 import logging
 import math
 import os
+from collections import deque
 from datetime import datetime, timedelta, timezone
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
-from homeassistant.helpers.event import async_track_state_change_event, async_track_time_interval
+from homeassistant.helpers.event import (
+    async_call_later,
+    async_track_state_change_event,
+    async_track_time_interval,
+)
 
 from . import planner as P
 from .const import (
@@ -115,6 +120,11 @@ class WattsonCoordinator:
         self.inputs: dict = {}
         self.last_error: str | None = None
         self.last_applied: str | None = None
+        self.reden: str = ""
+        self.volgende_actie: str | None = None
+        self.history: deque = deque(maxlen=50)
+        self._had_success = False
+        self._retry_cancel = None
         self.listeners: list = []
         self.sensors: list = []
 
@@ -196,6 +206,7 @@ class WattsonCoordinator:
 
     # ---------- kern ----------
     async def _tick(self, _now) -> None:
+        prev = (self.advies, self.last_applied)
         try:
             await self._plan_and_apply()
             self.last_error = None
@@ -204,8 +215,43 @@ class WattsonCoordinator:
             _LOGGER.exception("Wattson-tick faalde")
             if self.control_enabled:
                 await self._set_battery("rust", 0.0)  # veilige stand
+        # zolang er nog geen geslaagd plan is (bronnen traag na herstart):
+        # niet 5 minuten wachten maar elke 45 s opnieuw proberen
+        if self.advies == "geen data" and not self._had_success:
+            if self._retry_cancel is None:
+                self._retry_cancel = async_call_later(self.hass, 45, self._retry)
+        elif self.advies != "geen data":
+            self._had_success = True
+        self._log_decision(prev)
         for s in self.sensors:
             s.async_write_ha_state()
+
+    async def _retry(self, _now) -> None:
+        self._retry_cancel = None
+        await self._tick(None)
+
+    def _log_decision(self, prev) -> None:
+        """Historie bijhouden en logbook-regel schrijven bij een wijziging."""
+        now = datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M")
+        if (self.advies, self.last_applied) == prev:
+            return
+        self.history.appendleft({
+            "tijd": now,
+            "advies": self.advies,
+            "setpoint_w": self.setpoint_w,
+            "gestuurd": self.last_applied if self.control_enabled else "schaduw",
+            "reden": self.reden,
+        })
+        try:
+            self.hass.bus.async_fire("logbook_entry", {
+                "name": "Wattson",
+                "message": f"{self.advies} ({self.setpoint_w:+.0f} W) — {self.reden}"
+                           + ("" if self.control_enabled else " [schaduw]"),
+                "entity_id": "sensor.wattson_advies",
+                "domain": "wattson_ems",
+            })
+        except Exception:  # noqa: BLE001 - logbook is nice-to-have
+            pass
 
     async def _plan_and_apply(self) -> None:
         prices = self._price_forecast()
@@ -275,12 +321,25 @@ class WattsonCoordinator:
                 "verwachte_last_w": round(st.load_w),
                 "verwachte_pv_w": round(st.pv_w),
             })
+        # volgende geplande actie (voor het "waarom wacht hij"-inzicht)
+        nxt = next((p for p in self.plan_hours if abs(p["setpoint_w"]) > 50), None)
         if sp > 50:
             self.advies = "laden"
+            self.reden = f"goedkoop uur (€{steps[0].price_imp:.3f})"
+            self.volgende_actie = None
         elif sp < -50:
             self.advies = "ontladen"
+            self.reden = f"duur uur (€{steps[0].price_imp:.3f}), huis vraagt {steps[0].load_w:.0f} W"
+            self.volgende_actie = None
         else:
             self.advies = "rust"
+            if nxt and nxt is not self.plan_hours[0]:
+                act = "laden" if nxt["setpoint_w"] > 0 else "ontladen"
+                self.reden = f"wacht: {act} om {nxt['tijd']} (€{nxt['prijs']:.3f})"
+                self.volgende_actie = f"{act} om {nxt['tijd']} ({nxt['setpoint_w']:+d} W)"
+            else:
+                self.reden = "spread te klein binnen de horizon"
+                self.volgende_actie = None
 
         if not self.control_enabled:
             return

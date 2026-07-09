@@ -10,6 +10,7 @@ import voluptuous as vol
 
 from homeassistant import config_entries
 from homeassistant.core import callback
+from homeassistant.helpers import selector
 
 from .const import (
     ADAPTER_GENERIC,
@@ -45,47 +46,60 @@ from .const import (
 )
 
 
+def _ent(domain):
+    """Entity-dropdown (i.p.v. vrij tekstveld)."""
+    return selector.EntitySelector(selector.EntitySelectorConfig(domain=domain))
+
+
 def _schema(options: dict) -> vol.Schema:
     def d(key: str):
         return options.get(key, DEFAULT_OPTIONS[key])
 
+    def field(key, domain, required=True):
+        """Required/Optional met dropdown; lege default weglaten (selector
+        accepteert geen lege string als suggested value)."""
+        cur = d(key)
+        kw = {"default": cur} if cur else {}
+        cls = vol.Required if required and cur else vol.Optional
+        return (cls(key, **kw), _ent(domain))
+
     adapter = d(CONF_ADAPTER)
-    fields = {
-        vol.Required(CONF_ADAPTER, default=adapter): vol.In(ADAPTERS),
-        vol.Required(CONF_ENT_PRICE, default=d(CONF_ENT_PRICE)): str,
-        vol.Required(CONF_ENT_SOC, default=d(CONF_ENT_SOC)): str,
-        vol.Required(CONF_ENT_P1, default=d(CONF_ENT_P1)): str,
-        vol.Optional(CONF_ENT_WALLBOX_1, default=d(CONF_ENT_WALLBOX_1)): str,
-        vol.Optional(CONF_ENT_WALLBOX_2, default=d(CONF_ENT_WALLBOX_2)): str,
-        vol.Required(CONF_ENT_PV_NOW, default=d(CONF_ENT_PV_NOW)): str,
-        vol.Required(CONF_ENT_PV_REMAIN, default=d(CONF_ENT_PV_REMAIN)): str,
-        vol.Required(CONF_ENT_PV_TOMORROW, default=d(CONF_ENT_PV_TOMORROW)): str,
-        vol.Required(CONF_CAPACITY, default=d(CONF_CAPACITY)): vol.Coerce(float),
-        vol.Required(CONF_MIN_SOC_PCT, default=d(CONF_MIN_SOC_PCT)): vol.Coerce(float),
-        vol.Required(CONF_P_CHARGE, default=d(CONF_P_CHARGE)): vol.Coerce(float),
-        vol.Required(CONF_P_DISCHARGE, default=d(CONF_P_DISCHARGE)): vol.Coerce(float),
-    }
+    pairs = [
+        (vol.Required(CONF_ADAPTER, default=adapter), vol.In(ADAPTERS)),
+        field(CONF_ENT_PRICE, "sensor"),
+        field(CONF_ENT_SOC, "sensor"),
+        field(CONF_ENT_P1, "sensor"),
+        field(CONF_ENT_WALLBOX_1, "sensor", required=False),
+        field(CONF_ENT_WALLBOX_2, "sensor", required=False),
+        field(CONF_ENT_PV_NOW, "sensor"),
+        field(CONF_ENT_PV_REMAIN, "sensor"),
+        field(CONF_ENT_PV_TOMORROW, "sensor"),
+        (vol.Required(CONF_CAPACITY, default=d(CONF_CAPACITY)), vol.Coerce(float)),
+        (vol.Required(CONF_MIN_SOC_PCT, default=d(CONF_MIN_SOC_PCT)), vol.Coerce(float)),
+        (vol.Required(CONF_P_CHARGE, default=d(CONF_P_CHARGE)), vol.Coerce(float)),
+        (vol.Required(CONF_P_DISCHARGE, default=d(CONF_P_DISCHARGE)), vol.Coerce(float)),
+    ]
     if adapter == ADAPTER_ZENDURE:
-        fields.update({
-            vol.Required(CONF_ENT_ZD_OPERATION, default=d(CONF_ENT_ZD_OPERATION)): str,
-            vol.Required(CONF_ENT_ZD_MANUAL, default=d(CONF_ENT_ZD_MANUAL)): str,
-            vol.Optional(CONF_ENT_ZD_HEMS, default=d(CONF_ENT_ZD_HEMS)): str,
-            vol.Optional(CONF_ENT_ZD_CHG, default=d(CONF_ENT_ZD_CHG)): str,
-            vol.Optional(CONF_ENT_ZD_DIS, default=d(CONF_ENT_ZD_DIS)): str,
-        })
+        pairs += [
+            field(CONF_ENT_ZD_OPERATION, "select"),
+            field(CONF_ENT_ZD_MANUAL, "number"),
+            field(CONF_ENT_ZD_HEMS, "binary_sensor", required=False),
+            field(CONF_ENT_ZD_CHG, "sensor", required=False),
+            field(CONF_ENT_ZD_DIS, "sensor", required=False),
+        ]
     elif adapter == ADAPTER_MARSTEK:
-        fields.update({
-            vol.Required(CONF_ENT_MS_MODE, default=d(CONF_ENT_MS_MODE)): str,
-            vol.Required(CONF_ENT_MS_CHARGE, default=d(CONF_ENT_MS_CHARGE)): str,
-            vol.Required(CONF_ENT_MS_DISCHARGE, default=d(CONF_ENT_MS_DISCHARGE)): str,
-        })
+        pairs += [
+            field(CONF_ENT_MS_MODE, ["select", "number"]),
+            field(CONF_ENT_MS_CHARGE, "number"),
+            field(CONF_ENT_MS_DISCHARGE, "number"),
+        ]
     else:
-        fields.update({
-            vol.Optional(CONF_ENT_GEN_POWER, default=d(CONF_ENT_GEN_POWER)): str,
-            vol.Optional(CONF_ENT_GEN_CHARGE, default=d(CONF_ENT_GEN_CHARGE)): str,
-            vol.Optional(CONF_ENT_GEN_DISCHARGE, default=d(CONF_ENT_GEN_DISCHARGE)): str,
-        })
-    return vol.Schema(fields)
+        pairs += [
+            field(CONF_ENT_GEN_POWER, "number", required=False),
+            field(CONF_ENT_GEN_CHARGE, "number", required=False),
+            field(CONF_ENT_GEN_DISCHARGE, "number", required=False),
+        ]
+    return vol.Schema(dict(pairs))
 
 
 class WattsonConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):

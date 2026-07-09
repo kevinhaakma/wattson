@@ -7,7 +7,7 @@
 **Slimme thuisaccu-sturing voor Home Assistant**
 
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-2FD3FF.svg?style=for-the-badge)](https://github.com/hacs/integration)
-[![version](https://img.shields.io/badge/version-1.2.0-00E5A8.svg?style=for-the-badge)](#)
+[![version](https://img.shields.io/badge/version-1.3.0-00E5A8.svg?style=for-the-badge)](#)
 [![license](https://img.shields.io/badge/license-MIT-2FD3FF.svg?style=for-the-badge)](#)
 [![maintained](https://img.shields.io/badge/maintained-yes-00E5A8.svg?style=for-the-badge)](#)
 
@@ -164,3 +164,14 @@ Wattson is merk-onafhankelijk. Bij het toevoegen kies je een **adapter**:
 
 Accucapaciteit, minimale SoC en maximale laad-/ontlaadvermogens stel je in via
 **Opties** op de integratie — de planner schaalt daar automatisch op mee.
+
+
+## Inzicht in beslissingen (v1.3)
+
+- `sensor.wattson_advies` heeft nu de attributen **reden** (waarom deze actie),
+  **volgende_actie** (wat er gepland staat en wanneer) en **historie**
+  (laatste 50 beslissingen met tijd, setpoint en reden).
+- Elke wijziging verschijnt ook in het **HA-logboek** ("Wattson: ontladen (-420 W) — duur uur (€0.404)...").
+- Na een herstart probeert Wattson elke 45 s opnieuw tot de bronnen (prijs/SoC)
+  beschikbaar zijn, in plaats van 5 minuten te wachten.
+- Alle bron-entiteiten kies je nu uit een **dropdown** in plaats van een tekstveld.
