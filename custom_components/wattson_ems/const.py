@@ -55,39 +55,26 @@ CONF_P_DISCHARGE = "p_discharge_max_w"
 # aparte "Wattson verkopen"-switch aan.
 CONF_SELL_THRESHOLD = "verkoop_drempel_eur"
 
-# ---------- defaults: de huidige entity-ids op deze installatie ----------
-DEFAULT_ENT_PRICE = "sensor.zonneplan_current_electricity_tariff"
-DEFAULT_ENT_SOC = "sensor.solarflow_2400_ac_electric_level"
-DEFAULT_ENT_P1 = "sensor.p1_meter_power"
-DEFAULT_ENT_WALLBOX_1 = "sensor.keba_p20_charging_power"
-DEFAULT_ENT_WALLBOX_2 = "sensor.jimmy_charger_power"
-DEFAULT_ENT_PV_NOW = "sensor.power_production_now"
-DEFAULT_ENT_PV_REMAIN = "sensor.energy_production_today_remaining"
-DEFAULT_ENT_PV_TOMORROW = "sensor.energy_production_tomorrow"
-DEFAULT_ENT_ZD_OPERATION = "select.zendure_manager_operation"
-DEFAULT_ENT_ZD_MANUAL = "number.zendure_manager_manual_power"
-DEFAULT_ENT_ZD_HEMS = "binary_sensor.solarflow_2400_ac_hems_state"
-DEFAULT_ENT_ZD_CHG = "sensor.solarflow_2400_ac_grid_input_power"
-DEFAULT_ENT_ZD_DIS = "sensor.solarflow_2400_ac_output_home_power"
-DEFAULT_ENT_ZD_INLIM = "number.solarflow_2400_ac_input_limit"
-DEFAULT_ENT_ZD_OUTLIM = "number.solarflow_2400_ac_output_limit"
-
+# ---------- defaults ----------
+# Bewust géén entity-id's: elke installatie kiest zijn eigen bronnen in de
+# setup-wizard / options-flow. Een lege waarde betekent "niet geconfigureerd";
+# de coordinator behandelt lege entiteiten als afwezig.
 DEFAULT_OPTIONS = {
-    CONF_ENT_PRICE: DEFAULT_ENT_PRICE,
-    CONF_ENT_SOC: DEFAULT_ENT_SOC,
-    CONF_ENT_P1: DEFAULT_ENT_P1,
-    CONF_ENT_WALLBOX_1: DEFAULT_ENT_WALLBOX_1,
-    CONF_ENT_WALLBOX_2: DEFAULT_ENT_WALLBOX_2,
-    CONF_ENT_PV_NOW: DEFAULT_ENT_PV_NOW,
-    CONF_ENT_PV_REMAIN: DEFAULT_ENT_PV_REMAIN,
-    CONF_ENT_PV_TOMORROW: DEFAULT_ENT_PV_TOMORROW,
-    CONF_ENT_ZD_OPERATION: DEFAULT_ENT_ZD_OPERATION,
-    CONF_ENT_ZD_MANUAL: DEFAULT_ENT_ZD_MANUAL,
-    CONF_ENT_ZD_HEMS: DEFAULT_ENT_ZD_HEMS,
-    CONF_ENT_ZD_CHG: DEFAULT_ENT_ZD_CHG,
-    CONF_ENT_ZD_DIS: DEFAULT_ENT_ZD_DIS,
-    CONF_ENT_ZD_INLIM: DEFAULT_ENT_ZD_INLIM,
-    CONF_ENT_ZD_OUTLIM: DEFAULT_ENT_ZD_OUTLIM,
+    CONF_ENT_PRICE: "",
+    CONF_ENT_SOC: "",
+    CONF_ENT_P1: "",
+    CONF_ENT_WALLBOX_1: "",
+    CONF_ENT_WALLBOX_2: "",
+    CONF_ENT_PV_NOW: "",
+    CONF_ENT_PV_REMAIN: "",
+    CONF_ENT_PV_TOMORROW: "",
+    CONF_ENT_ZD_OPERATION: "",
+    CONF_ENT_ZD_MANUAL: "",
+    CONF_ENT_ZD_HEMS: "",
+    CONF_ENT_ZD_CHG: "",
+    CONF_ENT_ZD_DIS: "",
+    CONF_ENT_ZD_INLIM: "",
+    CONF_ENT_ZD_OUTLIM: "",
     CONF_ADAPTER: ADAPTER_ZENDURE,
     CONF_ENT_GEN_POWER: "",
     CONF_ENT_GEN_CHARGE: "",
