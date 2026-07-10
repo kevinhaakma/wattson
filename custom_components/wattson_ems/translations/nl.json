@@ -3,11 +3,63 @@
     "step": {
       "user": {
         "title": "Wattson instellen",
-        "description": "Wattson stuurt je thuisaccu op basis van dynamische energieprijzen met een rolling-horizon planner. Er is maar één instantie nodig — de bron-entiteiten stel je hierna in via de Opties-knop.",
+        "description": "Kies hoe Wattson jouw accu aanstuurt. In de volgende stappen koppel je eerst de metingen en stuurentiteiten; daarna wordt de integratie pas actief.",
         "data": {
           "adapter": "Accumerk (adapter)"
         }
+      },
+      "sources": {
+        "title": "Metingen en verwachtingen",
+        "description": "Kies de drie verplichte metingen. PV en EV zijn optioneel. Vermogenssensoren mogen W of kW gebruiken; energieverwachtingen Wh, kWh of MWh.",
+        "data": {
+          "ent_price": "Dynamische prijs-sensor met uurforecast",
+          "ent_soc": "Laadniveau accu (%)",
+          "ent_p1": "Netvermogen (+ import / - export)",
+          "ent_wallbox_1": "Laadpaalvermogen 1 (optioneel)",
+          "ent_wallbox_2": "Laadpaalvermogen 2 (optioneel)",
+          "ent_pv_now": "Actueel PV-vermogen (optioneel)",
+          "ent_pv_remain": "Resterende PV-energie vandaag (optioneel)",
+          "ent_pv_tomorrow": "PV-energie morgen (optioneel)"
+        }
+      },
+      "adapter": {
+        "title": "Accubediening",
+        "description": "Kies de entiteiten die Wattson mag bedienen. Telemetrie is optioneel, maar activeert de watchdog en verbetert de huislastschatting.",
+        "data": {
+          "ent_zd_operation": "Zendure operation-mode",
+          "ent_zd_manual": "Zendure handmatig vermogen",
+          "ent_zd_inlim": "Zendure laadlimiet",
+          "ent_zd_outlim": "Zendure ontlaadlimiet",
+          "ent_zd_hems": "Zendure HEMS / AI-status (optioneel)",
+          "ent_zd_chg": "Zendure gemeten laadvermogen (optioneel)",
+          "ent_zd_dis": "Zendure gemeten ontlaadvermogen (optioneel)",
+          "ent_ms_mode": "Marstek force-mode",
+          "ent_ms_charge": "Marstek geforceerd laadvermogen",
+          "ent_ms_discharge": "Marstek geforceerd ontlaadvermogen",
+          "ent_gen_power": "Generiek signed vermogen (+ laden / - ontladen)",
+          "ent_gen_charge": "Generiek laadvermogen",
+          "ent_gen_discharge": "Generiek ontlaadvermogen",
+          "ent_bat_chg": "Gemeten laadvermogen accu (optioneel)",
+          "ent_bat_dis": "Gemeten ontlaadvermogen accu (optioneel)"
+        }
+      },
+      "battery": {
+        "title": "Accugrenzen",
+        "description": "Vul de bruikbare accugrenzen in. Wattson plant nooit buiten deze waarden.",
+        "data": {
+          "capacity_kwh": "Bruikbare capaciteit (kWh)",
+          "min_soc_pct": "Minimaal laadniveau (%)",
+          "p_charge_max_w": "Maximaal laadvermogen (W)",
+          "p_discharge_max_w": "Maximaal ontlaadvermogen (W)",
+          "verkoop_drempel_eur": "Verkoopdrempel (€/kWh)"
+        }
       }
+    },
+    "error": {
+      "invalid_number": "Eén van de numerieke waarden is geen geldig getal.",
+      "must_be_positive": "Moet groter zijn dan nul.",
+      "soc_out_of_range": "Het minimale laadniveau moet tussen 0 en 100% liggen.",
+      "generic_power_missing": "Kies één signed vermogen-entiteit, of zowel een laad- als ontlaadentiteit."
     },
     "abort": {
       "single_instance_allowed": "Wattson is al geconfigureerd. Er kan maar één instantie tegelijk actief zijn."

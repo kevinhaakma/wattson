@@ -8,6 +8,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.restore_state import RestoreEntity
 
 from .const import AGGRO_DEFAULT, AGGRO_LEVELS, DOMAIN
+from .entity import wattson_device_info
 
 
 async def async_setup_entry(
@@ -24,6 +25,7 @@ class WattsonAggroSelect(SelectEntity, RestoreEntity):
 
     def __init__(self, coordinator):
         self.coordinator = coordinator
+        self._attr_device_info = wattson_device_info(coordinator)
         self._attr_current_option = AGGRO_DEFAULT
 
     async def async_added_to_hass(self):

@@ -247,10 +247,66 @@ class WattsonCoordinator:
         except ValueError:
             return None
 
+    def _unit(self, entity: str) -> str:
+        """Eenheid van een entity, genormaliseerd voor eenvoudige conversies."""
+        st = self.hass.states.get(entity) if entity else None
+        return str(st.attributes.get("unit_of_measurement", "")).strip().lower() if st else ""
+
+    def _power_w(self, entity: str) -> float | None:
+        """Lees een vermogensentity als watt; accepteert W, kW en MW."""
+        value = self._f(entity)
+        if value is None:
+            return None
+        unit = self._unit(entity)
+        if unit == "kw":
+            return value * 1000.0
+        if unit == "mw":
+            return value * 1_000_000.0
+        return value
+
+    def _fresh_power_w(self, entity: str, max_age_s: float = WATCH_FRESH_S) -> float | None:
+        """Als _power_w, maar alleen voor verse telemetrie."""
+        value = self._fresh(entity, max_age_s)
+        if value is None:
+            return None
+        unit = self._unit(entity)
+        if unit == "kw":
+            return value * 1000.0
+        if unit == "mw":
+            return value * 1_000_000.0
+        return value
+
+    def _energy_kwh(self, entity: str) -> float | None:
+        """Lees een energie-forecast als kWh; accepteert Wh, kWh en MWh."""
+        value = self._f(entity)
+        if value is None:
+            return None
+        unit = self._unit(entity)
+        if unit == "wh":
+            return value / 1000.0
+        if unit == "mwh":
+            return value * 1000.0
+        return value
+
+    @staticmethod
+    def _price_eur_kwh(value: float, unit: str) -> float:
+        """Normaliseer gangbare prijs-eenheden naar EUR/kWh."""
+        unit = unit.replace(" ", "").lower()
+        if "/mwh" in unit:
+            return value / 1000.0
+        if unit.startswith(("ct/", "c/")) or "cent/kwh" in unit:
+            return value / 100.0
+        return value
+
+    def _current_price(self) -> float | None:
+        value = self._f(self.ent_price)
+        return None if value is None else self._price_eur_kwh(value, self._unit(self.ent_price))
+
     def _ev_charging(self) -> bool:
-        w1 = self._f(self.ent_wallbox_1)
-        w2 = self._f(self.ent_wallbox_2)
-        return (w1 or 0.0) > EV_THRESHOLD_KW or (w2 or 0.0) > EV_THRESHOLD_KW
+        w1 = self._power_w(self.ent_wallbox_1)
+        w2 = self._power_w(self.ent_wallbox_2)
+        threshold_w = EV_THRESHOLD_KW * 1000.0
+        return (w1 or 0.0) > threshold_w or (w2 or 0.0) > threshold_w
 
     def _bat_flow_entities(self) -> tuple[str, str]:
         """(laad-, ontlaad-)telemetrie-entiteit voor de actieve adapter."""
@@ -285,7 +341,7 @@ class WattsonCoordinator:
                     raw = item.get("price", item.get("value"))
                     if raw is None:
                         continue
-                    price = float(raw)  # al in €/kWh
+                    price = self._price_eur_kwh(float(raw), self._unit(self.ent_price))
             except (KeyError, ValueError, TypeError):
                 continue
             if dt.tzinfo is None:
@@ -293,7 +349,7 @@ class WattsonCoordinator:
             if dt >= now:
                 out.append((dt, price))
         out.sort(key=lambda x: x[0])
-        cur = self._f(self.ent_price)
+        cur = self._current_price()
         if not out:
             if cur is not None:
                 out = [(now, cur)]
@@ -304,8 +360,8 @@ class WattsonCoordinator:
 
     def _pv_curve(self, hours: list[datetime]) -> dict[datetime, float]:
         """Verdeel de PV-forecast dagtotalen over een daglicht-bel (W per uur)."""
-        remain = (self._f(self.ent_pv_remain) or 0.0) * self.pv_bias
-        tomorrow = (self._f(self.ent_pv_tomorrow) or 0.0) * self.pv_bias
+        remain = (self._energy_kwh(self.ent_pv_remain) or 0.0) * self.pv_bias
+        tomorrow = (self._energy_kwh(self.ent_pv_tomorrow) or 0.0) * self.pv_bias
         lo, hi = DAGLICHT
         # HA-tijdzone, niet de host-OS-tijdzone (docker draait vaak op UTC)
         today = dt_util.now().date()
@@ -323,7 +379,7 @@ class WattsonCoordinator:
             for dt, w in zip(day_hours, weights):
                 out[dt] = (budget * w / tot * 1000.0) if tot > 0 else 0.0
         # het huidige uur weten we beter dan de bel
-        pv_now = self._f(self.ent_pv_now)
+        pv_now = self._power_w(self.ent_pv_now)
         if hours and pv_now is not None:
             out[hours[0]] = pv_now * self.pv_bias
         return out
@@ -373,8 +429,8 @@ class WattsonCoordinator:
         if not self.control_enabled:
             return
         ent_chg, ent_dis = self._bat_flow_entities()
-        dis = self._fresh(ent_dis)
-        chg = self._fresh(ent_chg)
+        dis = self._fresh_power_w(ent_dis)
+        chg = self._fresh_power_w(ent_chg)
         if dis is None and chg is None:
             return  # geen vers bewijs: geen oordeel
         verwacht_chg, verwacht_dis = self._expected_direction()
@@ -423,8 +479,8 @@ class WattsonCoordinator:
         ent_chg, ent_dis = self._bat_flow_entities()
         vers = (
             self._fresh(self.ent_soc, GEENDATA_STOP_S) is not None
-            or self._fresh(ent_chg, GEENDATA_STOP_S) is not None
-            or self._fresh(ent_dis, GEENDATA_STOP_S) is not None
+            or self._fresh_power_w(ent_chg, GEENDATA_STOP_S) is not None
+            or self._fresh_power_w(ent_dis, GEENDATA_STOP_S) is not None
         )
         now = dt_util.utcnow()
         if vers:
@@ -513,14 +569,19 @@ class WattsonCoordinator:
             weekend = loc.weekday() >= 5
             load = self.profile.get((loc.hour, int(weekend)), 0.35) * 1000.0
             if k == 0:
-                p1 = self._f(self.ent_p1)
-                wb_w = max((self._f(self.ent_wallbox_1) or 0.0), (self._f(self.ent_wallbox_2) or 0.0)) * 1000.0
+                p1 = self._power_w(self.ent_p1)
+                # De twee bronnen kunnen twee laders zijn, maar ook wallbox +
+                # voertuigtelemetrie van dezelfde sessie; max voorkomt dubbel tellen.
+                wb_w = max(
+                    self._power_w(self.ent_wallbox_1) or 0.0,
+                    self._power_w(self.ent_wallbox_2) or 0.0,
+                )
                 if p1 is not None:
                     # actuele huisvraag excl. EV én excl. het eigen accuvermogen
                     # (anders ziet de planner zijn eigen laden als huislast)
                     ent_chg, ent_dis = self._bat_flow_entities()
-                    b_chg = self._f(ent_chg) or 0.0
-                    b_dis = self._f(ent_dis) or 0.0
+                    b_chg = self._power_w(ent_chg) or 0.0
+                    b_dis = self._power_w(ent_dis) or 0.0
                     load = max(p1 - wb_w - b_chg + b_dis + (pv.get(dt, 0.0)), 0.0)
             steps.append(P.Step(
                 price_imp=price,
@@ -537,8 +598,8 @@ class WattsonCoordinator:
             "prijs_nu": round(steps[0].price_imp, 4),
             "huislast_nu_w": round(steps[0].load_w),
             "pv_nu_w": round(steps[0].pv_w),
-            "pv_rest_vandaag_kwh": round((self._f(self.ent_pv_remain) or 0.0) * self.pv_bias, 1),
-            "pv_morgen_kwh": round((self._f(self.ent_pv_tomorrow) or 0.0) * self.pv_bias, 1),
+            "pv_rest_vandaag_kwh": round((self._energy_kwh(self.ent_pv_remain) or 0.0) * self.pv_bias, 1),
+            "pv_morgen_kwh": round((self._energy_kwh(self.ent_pv_tomorrow) or 0.0) * self.pv_bias, 1),
             "ev_laadt": ev_now,
             "horizon_uren": len(steps),
             "eindwaarde_restlading": round(tv, 3),
@@ -664,24 +725,19 @@ class WattsonCoordinator:
         # discharge-guard verlaagt daarna realtime mee); verkopen is expliciet
         # onbegrensd (tot het maximum)
         if action == "ontladen" and p1_cap:
-            p1 = self._f(self.ent_p1)
+            p1 = self._power_w(self.ent_p1)
             power_w = min(power_w, max(p1 or 0.0, 0.0))
         signed = (
             power_w if action == "laden"
             else (-power_w if action in ("ontladen", "verkopen") else 0.0)
         )
         if self.ent_gen_power:
-            await self.hass.services.async_call(
-                "number", "set_value", {"entity_id": self.ent_gen_power, "value": signed}, blocking=True)
+            await self._power_num(self.ent_gen_power, signed)
         else:
             if self.ent_gen_charge:
-                await self.hass.services.async_call(
-                    "number", "set_value",
-                    {"entity_id": self.ent_gen_charge, "value": max(signed, 0.0)}, blocking=True)
+                await self._power_num(self.ent_gen_charge, max(signed, 0.0))
             if self.ent_gen_discharge:
-                await self.hass.services.async_call(
-                    "number", "set_value",
-                    {"entity_id": self.ent_gen_discharge, "value": max(-signed, 0.0)}, blocking=True)
+                await self._power_num(self.ent_gen_discharge, max(-signed, 0.0))
         if action == "ontladen":
             self._last_discharge_w = power_w
         self.last_applied = f"{action} ({signed:+.0f} W, generiek)"
@@ -694,25 +750,34 @@ class WattsonCoordinator:
         0=stop, 1=charge, 2=discharge, zoals de HA-modbus-config).
         """
         if action == "ontladen" and p1_cap:
-            p1 = self._f(self.ent_p1)
+            p1 = self._power_w(self.ent_p1)
             power_w = min(power_w, max(p1 or 0.0, 0.0))
         if action == "verkopen":
             # verkopen = ontladen zonder P1-cap
             power_w = min(power_w, self.params.p_discharge_max_w)
         # eerst het vermogen zetten, dan de mode (volgorde die het apparaat verwacht)
         if action == "laden" and self.ent_ms_charge:
-            await self.hass.services.async_call(
-                "number", "set_value", {"entity_id": self.ent_ms_charge, "value": power_w}, blocking=True)
+            await self._power_num(self.ent_ms_charge, power_w)
         if action in ("ontladen", "verkopen") and self.ent_ms_discharge:
-            await self.hass.services.async_call(
-                "number", "set_value", {"entity_id": self.ent_ms_discharge, "value": power_w}, blocking=True)
+            await self._power_num(self.ent_ms_discharge, power_w)
         mode_idx = {"laden": 1, "ontladen": 2, "verkopen": 2}.get(action, 0)
         if self.ent_ms_mode.startswith("select."):
             st = self.hass.states.get(self.ent_ms_mode)
             options = (st.attributes.get("options") if st else None) or []
-            want = {0: ("stop", "none", "off"), 1: ("charge",), 2: ("discharge",)}[mode_idx]
-            # 'discharge' bevat 'charge', dus match op de meest specifieke eerst
-            option = next((o2 for o2 in options if any(w == o2.lower() or (w in o2.lower() and not (w == "charge" and "discharge" in o2.lower())) for w in want)), None)
+            want = {
+                0: ("stop", "none", "off", "idle", "uit"),
+                1: ("charge", "charging", "laden"),
+                2: ("discharge", "discharging", "ontladen"),
+            }[mode_idx]
+            # 'discharge' bevat 'charge': een laadoptie mag daarom nooit een
+            # ontlaadlabel matchen. Nederlands en Engels worden ondersteund.
+            def matches(option_value: str) -> bool:
+                label = option_value.lower()
+                if mode_idx == 1 and ("discharg" in label or "ontlad" in label):
+                    return False
+                return any(token == label or token in label for token in want)
+
+            option = next((candidate for candidate in options if matches(candidate)), None)
             if option is None:
                 raise RuntimeError(f"geen passende optie voor '{action}' in {options}")
             await self.hass.services.async_call(
@@ -744,6 +809,14 @@ class WattsonCoordinator:
         await self.hass.services.async_call(
             "number", "set_value", {"entity_id": entity, "value": value}, blocking=True)
 
+    async def _power_num(self, entity: str, watts: float) -> None:
+        """Zet een number-vermogensentity, ongeacht of die W of kW gebruikt."""
+        unit = self._unit(entity)
+        native = watts / 1000.0 if unit == "kw" else watts
+        if unit == "mw":
+            native = watts / 1_000_000.0
+        await self._num(entity, native)
+
     async def _enforce_rest(self) -> None:
         """Rust afdwingen op apparaat-niveau als de accu aantoonbaar door blijft gaan.
 
@@ -754,14 +827,14 @@ class WattsonCoordinator:
         """
         if self.adapter != ADAPTER_ZENDURE:
             return
-        chg = self._fresh(self.ent_zd_chg)
-        dis = self._fresh(self.ent_zd_dis)
+        chg = self._fresh_power_w(self.ent_zd_chg)
+        dis = self._fresh_power_w(self.ent_zd_dis)
         if (chg is not None and chg > 100) or (dis is not None and dis > 100):
             _LOGGER.warning(
                 "Wattson: rust gecommandeerd maar accu is actief (laden %s W / ontladen %s W) — limieten naar 0",
                 "?" if chg is None else f"{chg:.0f}", "?" if dis is None else f"{dis:.0f}")
-            await self._num(self.ent_zd_inlim, 0)
-            await self._num(self.ent_zd_outlim, 0)
+            await self._power_num(self.ent_zd_inlim, 0)
+            await self._power_num(self.ent_zd_outlim, 0)
 
     async def _set_zendure(self, mode: str, manual_w: float, dis_limit_w: float | None = None) -> None:
         # zorg dat de apparaatlimieten open staan voor de gevraagde richting
@@ -772,16 +845,16 @@ class WattsonCoordinator:
         # leveren dan het plan wil; de 5-min-tick stelt bij).
         if mode in ("manual", "smart_charging", "store_solar") and self._tripped != "laden":
             if manual_w <= 0:  # manual laden of matching-laden
-                await self._num(self.ent_zd_inlim, self.params.p_charge_max_w)
+                await self._power_num(self.ent_zd_inlim, self.params.p_charge_max_w)
         if mode in ("smart_discharging", "smart") or (mode == "manual" and manual_w > 0):
             if self._tripped != "ontladen":
                 cap = self.params.p_discharge_max_w
                 if dis_limit_w is not None and dis_limit_w > 0:
                     cap = min(max(dis_limit_w, 100.0), cap)
-                await self._num(self.ent_zd_outlim, cap)
+                await self._power_num(self.ent_zd_outlim, cap)
         cur = self.hass.states.get(self.ent_zd_operation)
         if mode == "manual":
-            await self._num(self.ent_zd_manual, manual_w)
+            await self._power_num(self.ent_zd_manual, manual_w)
         if cur is None or cur.state != mode:
             await self.hass.services.async_call(
                 "select", "select_option", {"entity_id": self.ent_zd_operation, "option": mode}, blocking=True)
@@ -804,7 +877,7 @@ class WattsonCoordinator:
         now = time.monotonic()
         if now - self._dis_guard_last < DIS_GUARD_THROTTLE_S:
             return
-        p1 = self._fresh(self.ent_p1, 60)
+        p1 = self._fresh_power_w(self.ent_p1, 60)
         if p1 is None or p1 >= 0:
             return  # geen export: niets te verlagen
         allowed = max(self._last_discharge_w + p1, 0.0)
@@ -836,9 +909,9 @@ class WattsonCoordinator:
         await self._watchdog()
         if self._tripped:
             return
-        p1 = self._fresh(self.ent_p1, 120)
+        p1 = self._fresh_power_w(self.ent_p1, 120)
         soc_pct = self._f(self.ent_soc)
-        prijs = self._f(self.ent_price)
+        prijs = self._current_price()
         if p1 is None or soc_pct is None or prijs is None:
             return
         soc = soc_pct / 100.0 * self.params.capacity_kwh

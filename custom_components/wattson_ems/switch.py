@@ -8,6 +8,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.restore_state import RestoreEntity
 
 from .const import DOMAIN
+from .entity import wattson_device_info
 
 
 async def async_setup_entry(
@@ -28,6 +29,7 @@ class WattsonControlSwitch(SwitchEntity, RestoreEntity):
 
     def __init__(self, coordinator):
         self.coordinator = coordinator
+        self._attr_device_info = wattson_device_info(coordinator)
 
     async def async_added_to_hass(self):
         await super().async_added_to_hass()
@@ -59,6 +61,7 @@ class WattsonAssistSwitch(SwitchEntity, RestoreEntity):
 
     def __init__(self, coordinator):
         self.coordinator = coordinator
+        self._attr_device_info = wattson_device_info(coordinator)
 
     async def async_added_to_hass(self):
         await super().async_added_to_hass()
@@ -90,6 +93,7 @@ class WattsonSellSwitch(SwitchEntity, RestoreEntity):
 
     def __init__(self, coordinator):
         self.coordinator = coordinator
+        self._attr_device_info = wattson_device_info(coordinator)
 
     async def async_added_to_hass(self):
         await super().async_added_to_hass()

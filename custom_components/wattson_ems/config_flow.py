@@ -1,8 +1,8 @@
 """Config- en options-flow voor Wattson.
 
-Single-instance integratie: bij het toevoegen kies je alleen het accumerk
-(adapter); alle bron-entiteiten en accu-eigenschappen zijn daarna aanpasbaar
-via de Opties-knop op de integratie.
+Single-instance integratie met een begeleide eerste setup voor accumerk,
+meetbronnen, stuurentiteiten en veilige accugrenzen. Alles blijft daarna
+aanpasbaar via de Opties-knop op de integratie.
 """
 from __future__ import annotations
 
@@ -55,7 +55,10 @@ from .const import (
 # veld weg uit user_input; zonder deze lijst kun je een optioneel veld
 # nooit meer wissen omdat de merge de oude waarde terugzet)
 _OPTIONAL_ENTITY_KEYS = {
-    None: [CONF_ENT_WALLBOX_1, CONF_ENT_WALLBOX_2],  # adapter-onafhankelijk
+    None: [
+        CONF_ENT_WALLBOX_1, CONF_ENT_WALLBOX_2,
+        CONF_ENT_PV_NOW, CONF_ENT_PV_REMAIN, CONF_ENT_PV_TOMORROW,
+    ],  # adapter-onafhankelijk
     ADAPTER_ZENDURE: [CONF_ENT_ZD_HEMS, CONF_ENT_ZD_CHG, CONF_ENT_ZD_DIS],
     ADAPTER_MARSTEK: [CONF_ENT_BAT_CHG, CONF_ENT_BAT_DIS],
     ADAPTER_GENERIC: [
@@ -70,64 +73,92 @@ def _ent(domain):
     return selector.EntitySelector(selector.EntitySelectorConfig(domain=domain))
 
 
-def _schema(options: dict) -> vol.Schema:
-    def d(key: str):
-        return options.get(key, DEFAULT_OPTIONS[key])
+def _value(options: dict, key: str):
+    return options.get(key, DEFAULT_OPTIONS[key])
 
-    def field(key, domain, required=True):
-        """Required/Optional met dropdown; lege default weglaten (selector
-        accepteert geen lege string als suggested value). Required blijft
-        required, óók als er nog geen waarde staat — anders kan een kapotte
-        configuratie zonder stuur-entiteiten worden opgeslagen."""
-        cur = d(key)
-        kw = {"default": cur} if cur else {}
-        cls = vol.Required if required else vol.Optional
-        return (cls(key, **kw), _ent(domain))
 
-    adapter = d(CONF_ADAPTER)
-    pairs = [
-        (vol.Required(CONF_ADAPTER, default=adapter), vol.In(ADAPTERS)),
-        field(CONF_ENT_PRICE, "sensor"),
-        field(CONF_ENT_SOC, "sensor"),
-        field(CONF_ENT_P1, "sensor"),
-        field(CONF_ENT_WALLBOX_1, "sensor", required=False),
-        field(CONF_ENT_WALLBOX_2, "sensor", required=False),
-        field(CONF_ENT_PV_NOW, "sensor"),
-        field(CONF_ENT_PV_REMAIN, "sensor"),
-        field(CONF_ENT_PV_TOMORROW, "sensor"),
-        (vol.Required(CONF_CAPACITY, default=d(CONF_CAPACITY)), vol.Coerce(float)),
-        (vol.Required(CONF_MIN_SOC_PCT, default=d(CONF_MIN_SOC_PCT)), vol.Coerce(float)),
-        (vol.Required(CONF_P_CHARGE, default=d(CONF_P_CHARGE)), vol.Coerce(float)),
-        (vol.Required(CONF_P_DISCHARGE, default=d(CONF_P_DISCHARGE)), vol.Coerce(float)),
-        (vol.Required(CONF_SELL_THRESHOLD, default=d(CONF_SELL_THRESHOLD)), vol.Coerce(float)),
-    ]
+def _field(options: dict, key, domain, required=True):
+    """Entity-selector met een default alleen wanneer die echt bestaat."""
+    current = _value(options, key)
+    kwargs = {"default": current} if current else {}
+    marker = vol.Required if required else vol.Optional
+    return marker(key, **kwargs), _ent(domain)
+
+
+def _source_schema(options: dict) -> vol.Schema:
+    """Meetbronnen; alleen prijs, SoC en netvermogen zijn noodzakelijk."""
+    return vol.Schema(dict([
+        _field(options, CONF_ENT_PRICE, "sensor"),
+        _field(options, CONF_ENT_SOC, "sensor"),
+        _field(options, CONF_ENT_P1, "sensor"),
+        _field(options, CONF_ENT_WALLBOX_1, "sensor", required=False),
+        _field(options, CONF_ENT_WALLBOX_2, "sensor", required=False),
+        _field(options, CONF_ENT_PV_NOW, "sensor", required=False),
+        _field(options, CONF_ENT_PV_REMAIN, "sensor", required=False),
+        _field(options, CONF_ENT_PV_TOMORROW, "sensor", required=False),
+    ]))
+
+
+def _adapter_schema(options: dict) -> vol.Schema:
+    adapter = _value(options, CONF_ADAPTER)
+    pairs = []
     if adapter == ADAPTER_ZENDURE:
         pairs += [
-            field(CONF_ENT_ZD_OPERATION, "select"),
-            field(CONF_ENT_ZD_MANUAL, "number"),
-            field(CONF_ENT_ZD_INLIM, "number"),
-            field(CONF_ENT_ZD_OUTLIM, "number"),
-            field(CONF_ENT_ZD_HEMS, "binary_sensor", required=False),
-            field(CONF_ENT_ZD_CHG, "sensor", required=False),
-            field(CONF_ENT_ZD_DIS, "sensor", required=False),
+            _field(options, CONF_ENT_ZD_OPERATION, "select"),
+            _field(options, CONF_ENT_ZD_MANUAL, "number"),
+            _field(options, CONF_ENT_ZD_INLIM, "number"),
+            _field(options, CONF_ENT_ZD_OUTLIM, "number"),
+            _field(options, CONF_ENT_ZD_HEMS, "binary_sensor", required=False),
+            _field(options, CONF_ENT_ZD_CHG, "sensor", required=False),
+            _field(options, CONF_ENT_ZD_DIS, "sensor", required=False),
         ]
     elif adapter == ADAPTER_MARSTEK:
         pairs += [
-            field(CONF_ENT_MS_MODE, ["select", "number"]),
-            field(CONF_ENT_MS_CHARGE, "number"),
-            field(CONF_ENT_MS_DISCHARGE, "number"),
-            field(CONF_ENT_BAT_CHG, "sensor", required=False),
-            field(CONF_ENT_BAT_DIS, "sensor", required=False),
+            _field(options, CONF_ENT_MS_MODE, ["select", "number"]),
+            _field(options, CONF_ENT_MS_CHARGE, "number"),
+            _field(options, CONF_ENT_MS_DISCHARGE, "number"),
+            _field(options, CONF_ENT_BAT_CHG, "sensor", required=False),
+            _field(options, CONF_ENT_BAT_DIS, "sensor", required=False),
         ]
     else:
         pairs += [
-            field(CONF_ENT_GEN_POWER, "number", required=False),
-            field(CONF_ENT_GEN_CHARGE, "number", required=False),
-            field(CONF_ENT_GEN_DISCHARGE, "number", required=False),
-            field(CONF_ENT_BAT_CHG, "sensor", required=False),
-            field(CONF_ENT_BAT_DIS, "sensor", required=False),
+            _field(options, CONF_ENT_GEN_POWER, "number", required=False),
+            _field(options, CONF_ENT_GEN_CHARGE, "number", required=False),
+            _field(options, CONF_ENT_GEN_DISCHARGE, "number", required=False),
+            _field(options, CONF_ENT_BAT_CHG, "sensor", required=False),
+            _field(options, CONF_ENT_BAT_DIS, "sensor", required=False),
         ]
     return vol.Schema(dict(pairs))
+
+
+def _battery_schema(options: dict) -> vol.Schema:
+    return vol.Schema({
+        vol.Required(CONF_CAPACITY, default=_value(options, CONF_CAPACITY)): vol.Coerce(float),
+        vol.Required(CONF_MIN_SOC_PCT, default=_value(options, CONF_MIN_SOC_PCT)): vol.Coerce(float),
+        vol.Required(CONF_P_CHARGE, default=_value(options, CONF_P_CHARGE)): vol.Coerce(float),
+        vol.Required(CONF_P_DISCHARGE, default=_value(options, CONF_P_DISCHARGE)): vol.Coerce(float),
+        vol.Required(CONF_SELL_THRESHOLD, default=_value(options, CONF_SELL_THRESHOLD)): vol.Coerce(float),
+    })
+
+
+def _schema(options: dict) -> vol.Schema:
+    """Compacte options-flow voor bestaande installaties."""
+    adapter = _value(options, CONF_ADAPTER)
+    combined = {vol.Required(CONF_ADAPTER, default=adapter): vol.In(ADAPTERS)}
+    combined.update(_source_schema(options).schema)
+    combined.update(_adapter_schema(options).schema)
+    combined.update(_battery_schema(options).schema)
+    return vol.Schema(combined)
+
+
+def _new_options(adapter: str) -> dict:
+    """Veilige start voor nieuwe installaties zonder persoonlijke entity-id's."""
+    options = dict(DEFAULT_OPTIONS)
+    for key in options:
+        if key.startswith("ent_"):
+            options[key] = ""
+    options[CONF_ADAPTER] = adapter
+    return options
 
 
 def _validate(merged: dict) -> dict[str, str]:
@@ -161,22 +192,66 @@ def _validate(merged: dict) -> dict[str, str]:
 
 
 class WattsonConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
-    """Config flow: één instantie; alleen adapterkeuze, rest via Opties."""
+    """Begeleide eerste setup: merk, bronnen, bediening en accugegevens."""
 
     VERSION = 1
+    _setup_options: dict
 
     async def async_step_user(self, user_input: dict | None = None):
         if self._async_current_entries():
             return self.async_abort(reason="single_instance_allowed")
         if user_input is not None:
-            options = dict(DEFAULT_OPTIONS)
-            options[CONF_ADAPTER] = user_input[CONF_ADAPTER]
-            return self.async_create_entry(title="Wattson", data={}, options=options)
+            self._setup_options = _new_options(user_input[CONF_ADAPTER])
+            return await self.async_step_sources()
         return self.async_show_form(
             step_id="user",
             data_schema=vol.Schema({
                 vol.Required(CONF_ADAPTER, default=ADAPTER_ZENDURE): vol.In(ADAPTERS),
             }),
+        )
+
+    async def async_step_sources(self, user_input: dict | None = None):
+        if user_input is not None:
+            self._setup_options.update(user_input)
+            for key in _OPTIONAL_ENTITY_KEYS[None]:
+                if key not in user_input:
+                    self._setup_options[key] = ""
+            return await self.async_step_adapter()
+        return self.async_show_form(
+            step_id="sources", data_schema=_source_schema(self._setup_options))
+
+    async def async_step_adapter(self, user_input: dict | None = None):
+        if user_input is not None:
+            self._setup_options.update(user_input)
+            adapter = self._setup_options[CONF_ADAPTER]
+            for key in _OPTIONAL_ENTITY_KEYS.get(adapter, []):
+                if key not in user_input:
+                    self._setup_options[key] = ""
+            errors = _validate(self._setup_options)
+            # Numerieke defaults zijn hier al geldig; alleen een generic
+            # combinatie kan op deze stap een cross-field-fout opleveren.
+            if errors.get("base") == "generic_power_missing":
+                return self.async_show_form(
+                    step_id="adapter",
+                    data_schema=_adapter_schema(self._setup_options),
+                    errors={"base": "generic_power_missing"},
+                )
+            return await self.async_step_battery()
+        return self.async_show_form(
+            step_id="adapter", data_schema=_adapter_schema(self._setup_options))
+
+    async def async_step_battery(self, user_input: dict | None = None):
+        errors = {}
+        if user_input is not None:
+            self._setup_options.update(user_input)
+            errors = _validate(self._setup_options)
+            if not errors:
+                return self.async_create_entry(
+                    title="Wattson", data={}, options=self._setup_options)
+        return self.async_show_form(
+            step_id="battery",
+            data_schema=_battery_schema(self._setup_options),
+            errors=errors,
         )
 
     @staticmethod

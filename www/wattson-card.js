@@ -50,7 +50,15 @@ class WattsonCard extends HTMLElement {
       <style>${WattsonCard._css()}</style>
       <ha-card>
         <div class="wc-header">
-          <span class="wc-title"></span>
+          <div class="wc-brand">
+            <svg class="wc-brand-icon" viewBox="0 0 256 256" aria-hidden="true">
+              <defs><linearGradient id="wc-energy" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#2F7FE2"/><stop offset="1" stop-color="#13B887"/></linearGradient></defs>
+              <rect x="104" y="20" width="48" height="28" rx="9" fill="url(#wc-energy)"/>
+              <rect x="48" y="40" width="160" height="192" rx="36" fill="url(#wc-energy)"/>
+              <path d="M151 66 92 151h34l-20 57 62-91h-35z" fill="#fff"/>
+            </svg>
+            <span class="wc-title"></span>
+          </div>
           <span class="wc-trained"></span>
         </div>
         <div class="wc-body">
@@ -133,6 +141,7 @@ class WattsonCard extends HTMLElement {
     const labels = {
       laden: "Laden",
       ontladen: "Ontladen",
+      verkopen: "Verkopen",
       rust: "Rust",
       init: "Bezig met plannen…",
       "geen data": "Geen data",
@@ -143,6 +152,7 @@ class WattsonCard extends HTMLElement {
   static _statusClass(advies) {
     if (advies === "laden") return "charge";
     if (advies === "ontladen") return "discharge";
+    if (advies === "verkopen") return "sell";
     if (advies === "rust") return "idle";
     return "unknown";
   }
@@ -200,7 +210,19 @@ class WattsonCard extends HTMLElement {
       .wc-header {
         display: flex;
         justify-content: space-between;
-        align-items: baseline;
+        align-items: center;
+        gap: 12px;
+      }
+      .wc-brand {
+        display: flex;
+        align-items: center;
+        gap: 9px;
+        min-width: 0;
+      }
+      .wc-brand-icon {
+        width: 30px;
+        height: 30px;
+        flex: 0 0 auto;
       }
       .wc-title {
         font-size: 1rem;
@@ -234,6 +256,7 @@ class WattsonCard extends HTMLElement {
       }
       .wc-status-charge { color: var(--energy-battery-out-color, #2FD3FF); }
       .wc-status-discharge { color: var(--energy-battery-in-color, #00E5A8); }
+      .wc-status-sell { color: var(--energy-grid-return-color, #FFB86B); }
       .wc-status-idle { color: var(--secondary-text-color); }
       .wc-status-unknown { color: var(--warning-color, #F5C542); }
       .wc-stats {

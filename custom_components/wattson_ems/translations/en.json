@@ -3,11 +3,63 @@
     "step": {
       "user": {
         "title": "Set up Wattson",
-        "description": "Wattson steers your home battery based on dynamic energy prices using a rolling-horizon planner. Only one instance is needed — configure the source entities afterwards via the Options button.",
+        "description": "Choose how Wattson controls your battery. The next steps connect your measurements and control entities before the integration becomes active.",
         "data": {
           "adapter": "Battery brand (adapter)"
         }
+      },
+      "sources": {
+        "title": "Measurements and forecasts",
+        "description": "Select the three required measurements. PV and EV entities are optional. Power sensors may use W or kW; energy forecasts may use Wh, kWh or MWh.",
+        "data": {
+          "ent_price": "Dynamic price sensor with hourly forecast",
+          "ent_soc": "Battery state of charge (%)",
+          "ent_p1": "Grid power (+ import / - export)",
+          "ent_wallbox_1": "EV charger power 1 (optional)",
+          "ent_wallbox_2": "EV charger power 2 (optional)",
+          "ent_pv_now": "Current PV power (optional)",
+          "ent_pv_remain": "PV energy remaining today (optional)",
+          "ent_pv_tomorrow": "PV energy tomorrow (optional)"
+        }
+      },
+      "adapter": {
+        "title": "Battery control",
+        "description": "Select the entities Wattson may control. Telemetry is optional, but enables watchdog protection and better load estimation.",
+        "data": {
+          "ent_zd_operation": "Zendure operation mode",
+          "ent_zd_manual": "Zendure manual power",
+          "ent_zd_inlim": "Zendure charge limit",
+          "ent_zd_outlim": "Zendure discharge limit",
+          "ent_zd_hems": "Zendure HEMS / AI status (optional)",
+          "ent_zd_chg": "Zendure measured charge power (optional)",
+          "ent_zd_dis": "Zendure measured discharge power (optional)",
+          "ent_ms_mode": "Marstek force mode",
+          "ent_ms_charge": "Marstek forced charge power",
+          "ent_ms_discharge": "Marstek forced discharge power",
+          "ent_gen_power": "Generic signed power (+ charge / - discharge)",
+          "ent_gen_charge": "Generic charge power",
+          "ent_gen_discharge": "Generic discharge power",
+          "ent_bat_chg": "Measured battery charge power (optional)",
+          "ent_bat_dis": "Measured battery discharge power (optional)"
+        }
+      },
+      "battery": {
+        "title": "Battery limits",
+        "description": "Enter the usable battery limits. Wattson never plans outside these values.",
+        "data": {
+          "capacity_kwh": "Usable capacity (kWh)",
+          "min_soc_pct": "Minimum state of charge (%)",
+          "p_charge_max_w": "Maximum charge power (W)",
+          "p_discharge_max_w": "Maximum discharge power (W)",
+          "verkoop_drempel_eur": "Sell threshold (€/kWh)"
+        }
       }
+    },
+    "error": {
+      "invalid_number": "One of the numeric values is not a valid number.",
+      "must_be_positive": "Must be greater than zero.",
+      "soc_out_of_range": "Minimum SoC must be between 0 and 100%.",
+      "generic_power_missing": "Choose a signed power entity, or both charge and discharge entities."
     },
     "abort": {
       "single_instance_allowed": "Wattson is already configured. Only one instance is allowed."

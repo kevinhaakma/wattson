@@ -7,6 +7,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import DOMAIN
+from .entity import wattson_device_info
 
 
 async def async_setup_entry(
@@ -24,6 +25,7 @@ class WattsonAdviesSensor(SensorEntity):
 
     def __init__(self, coordinator):
         self.coordinator = coordinator
+        self._attr_device_info = wattson_device_info(coordinator)
         coordinator.sensors.append(self)
 
     @property
@@ -48,6 +50,9 @@ class WattsonAdviesSensor(SensorEntity):
             "reserve_kwh": round(c.reserve_kwh, 2),
             "historie": list(c.history),
             "agressiviteit": c.aggressiveness,
+            "adapter": c.adapter,
+            "watchdog_telemetrie": "actief" if any(c._bat_flow_entities()) else "niet geconfigureerd",
+            "export_guard": "apparaat-P1-matching" if c.adapter == "zendure" else "Wattson P1-guard",
             "sturing_actief": c.control_enabled,
             "laatst_gestuurd": c.last_applied,
             "fout": c.last_error,
@@ -69,6 +74,7 @@ class WattsonBesparingSensor(SensorEntity):
 
     def __init__(self, coordinator):
         self.coordinator = coordinator
+        self._attr_device_info = wattson_device_info(coordinator)
         coordinator.sensors.append(self)
 
     @property
