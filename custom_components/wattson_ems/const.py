@@ -113,6 +113,11 @@ DAGLICHT = (7, 21)         # uren waarbinnen de PV-bel wordt verdeeld
 WATCH_FRESH_S = 180        # meetwaarde ouder dan dit telt niet als bewijs
 WATCH_RUNAWAY_W = 300      # accuvermogen boven dit zonder opdracht = runaway
 GEENDATA_STOP_S = 600      # telemetrie zo lang stil met sturing aan -> veilig stoppen
+# na een eigen stopcommando blijft het apparaat nog even actief (cloud-
+# latentie); zolang de grace loopt is de zojuist gestopte richting geen
+# runaway (incident 2026-07-10 14:53: assist stopte bij wolk, watchdog zag
+# de uitlopende 1592 W laden als runaway en tripte onnodig)
+WATCH_STOP_GRACE_S = 45
 
 # discharge-guard (marstek/generic): het ontlaad-setpoint is daar een vast
 # vermogen; zakt de huisvraag, dan verlaagt deze altijd-actieve bewaking het

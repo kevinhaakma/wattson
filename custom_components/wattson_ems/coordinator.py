@@ -95,6 +95,7 @@ from .const import (
     UPDATE_MINUTES,
     WATCH_FRESH_S,
     WATCH_RUNAWAY_W,
+    WATCH_STOP_GRACE_S,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -188,6 +189,8 @@ class WattsonCoordinator:
         self._last_action: str | None = None
         self._last_charge_w = 0.0      # laatst werkelijk toegepast laadvermogen
         self._last_discharge_w = 0.0   # laatst werkelijk toegepast ontlaadvermogen
+        self._stop_grace_until = 0.0   # tot dit monotonic-moment is uitloop van
+        self._stopped_richting: str | None = None  # ...deze richting geen runaway
         self._dis_guard_last = 0.0
         self._switch_debt = 0.0        # opgeteld gemist voordeel van gedempte modewissels
         self._last_load_w: float | None = None  # huisvraag vorige tick (EV-sprong-detectie)
@@ -422,6 +425,12 @@ class WattsonCoordinator:
         elif dis is not None and dis > self.params.p_discharge_max_w + 500:
             afwijking = f"ontlaadvermogen {dis:.0f} W ver boven limiet"
             richting = "ontladen"
+        if afwijking and richting == self._stopped_richting and time.monotonic() < self._stop_grace_until:
+            # uitloop van een zojuist zelf gestopte actie: het apparaat heeft
+            # cloud-latentie en mag binnen de grace nog in die richting actief
+            # zijn — geen runaway; na de grace geldt de normale bewaking weer
+            _LOGGER.debug("Wattson watchdog: %s genegeerd (stop-grace na eigen stopcommando)", afwijking)
+            return
         if afwijking:
             # eerst registreren en melden, dan pas stoppen: ook als het
             # stop-commando faalt is de ingreep zichtbaar
@@ -749,6 +758,13 @@ class WattsonCoordinator:
         if action == "laden_overschot" and not self.caps.surplus_mode:
             action = "laden"  # geen native overschot-modus op dit merk
         applied = await self.adapter_impl.apply(action, power_w, p1_cap=p1_cap)
+        # eigen stop geregistreerd: het apparaat loopt (cloud-latentie) nog even
+        # uit in de oude richting — de watchdog mag dat geen runaway noemen
+        if action == "rust" and self._last_action in (
+                "laden", "laden_overschot", "ontladen", "verkopen"):
+            self._stopped_richting = (
+                "laden" if self._last_action in ("laden", "laden_overschot") else "ontladen")
+            self._stop_grace_until = time.monotonic() + WATCH_STOP_GRACE_S
         self._last_action = action
         self._last_charge_w = applied if action in ("laden", "laden_overschot") else 0.0
         self._last_discharge_w = applied if action in ("ontladen", "verkopen") else 0.0
