@@ -122,11 +122,16 @@ GEENDATA_STOP_S = 600      # telemetrie zo lang stil met sturing aan -> veilig s
 # de uitlopende 1592 W laden als runaway en tripte onnodig)
 WATCH_STOP_GRACE_S = 45
 
-# snelle volglus: werkt de stuurwaarden (outputlimiet / vaste setpoints) elke
-# TRACK_INTERVAL_S bij op de gemeten vraag, met een dode band tegen schrijf-
-# spam. Overbrugt het gat tussen de plan-ticks: een verbruikspiek bovenop het
-# uur-setpoint komt anders tot 10 min lang van het net op piekprijs.
-TRACK_INTERVAL_S = 30
+# Volgen van de gemeten vraag. Asymmetrisch, want de twee richtingen hebben
+# verschillende urgentie:
+# - RUIMTE GEVEN (limiet/setpoint omhoog naar de vraag) is haastwerk: zolang
+#   het te laag staat komt de piek van het net. Gebeurt event-gedreven op de
+#   P1-meter, throttled op TRACK_FAST_THROTTLE_S. Commando-latentie is gemeten
+#   op ~0,2 s, dus dit landt binnen een seconde na de meterupdate.
+# - TERUGNEMEN mag lui: te veel ruimte kost niets (matching exporteert niet,
+#   en op vaste adapters remt de discharge-guard direct bij export).
+TRACK_INTERVAL_S = 30      # trage lus: terugnemen + surplus-promotie
+TRACK_FAST_THROTTLE_S = 2  # snelle lus: minimale tijd tussen twee ophogingen
 TRACK_DEADBAND_W = 100     # pas schrijven als het doel zoveel afwijkt
 TRACK_MARGE_W = 150        # limiet iets boven de vraag zodat matching kan ademen
 

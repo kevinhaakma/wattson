@@ -93,6 +93,7 @@ from .const import (
     GEENDATA_STOP_S,
     SWITCH_DEADBAND_EUR,
     TRACK_DEADBAND_W,
+    TRACK_FAST_THROTTLE_S,
     TRACK_INTERVAL_S,
     TRACK_MARGE_W,
     UPDATE_MINUTES,
@@ -196,6 +197,7 @@ class WattsonCoordinator:
         self._stop_grace_until = 0.0   # tot dit monotonic-moment is uitloop van
         self._stopped_richting: str | None = None  # ...deze richting geen runaway
         self._tracked_outlim = 0.0     # laatst door de volglus geschreven outputlimiet
+        self._track_fast_last = 0.0
         self._dis_guard_last = 0.0
         self._switch_debt = 0.0        # opgeteld gemist voordeel van gedempte modewissels
         self._last_load_w: float | None = None  # huisvraag vorige tick (EV-sprong-detectie)
@@ -227,6 +229,9 @@ class WattsonCoordinator:
             ))))
             self.listeners.append(async_track_state_change_event(
                 self.hass, assist_entities, self._assist_check))
+            # snelle volg-laag: ruimte geven zodra de meter een piek toont
+            self.listeners.append(async_track_state_change_event(
+                self.hass, [self.ent_p1], self._track_fast))
             if not self.caps.p1_matching:
                 # vast-setpoint-adapters: altijd-actieve guard verlaagt het
                 # ontlaadvermogen zodra de huisvraag zakt
@@ -498,45 +503,88 @@ class WattsonCoordinator:
                 "message": f"telemetrie > {GEENDATA_STOP_S / 60:.0f} min stil: accu veilig gestopt",
                 "entity_id": "sensor.wattson_advies", "domain": "wattson_ems"})
 
-    async def _track_tick(self, _now) -> None:
-        """Snelle volglus (elke TRACK_INTERVAL_S): stuurwaarden bij de vraag houden.
+    def _discharge_target(self) -> float | None:
+        """Gewenst ontlaadvermogen op basis van de gemeten bronvraag (of None)."""
+        if not self.control_enabled or self._tripped or self._ev_charging():
+            return None
+        if self._last_action != "ontladen":
+            return None
+        p1 = self._fresh_power_w(self.ent_p1, 90)
+        if p1 is None:
+            return None
+        _, ent_dis = self._bat_flow_entities()
+        dis = self._fresh_power_w(ent_dis)
+        dis_now = dis if dis is not None else self._last_discharge_w
+        return max(A.p1_without_battery(p1, discharge_w=dis_now), 0.0)
 
-        - ontladen (P1-matching): de outputlimiet volgt de werkelijke huisvraag
-          (+marge) i.p.v. het uur-setpoint, zodat een verbruikspiek bovenop het
-          plan uit de accu komt en niet tot de volgende plan-tick van het net;
-          matching zelf houdt export tegen, dus de limiet mag ademen.
-        - ontladen (vast setpoint, marstek/generic): het setpoint volgt de
-          huisvraag in béide richtingen (software-matching); de discharge-guard
-          blijft de snelle export-rem tussen twee lus-runs in.
+    @callback
+    def _track_fast(self, _event) -> None:
+        """Ruimte geven zodra de meter een piek toont (event-gedreven, throttled).
+
+        Staat de limiet/het setpoint onder de werkelijke vraag, dan komt dat
+        verschil van het net. Dit is dus haastwerk: de P1-meter tikt elke ~1 s
+        en een commando landt in ~0,2 s, dus de accu volgt binnen enkele
+        seconden — net als de fabrikant-app. Terugnemen mag lui (_track_tick):
+        te veel ruimte kost niets, want matching exporteert niet en op vaste
+        adapters remt de discharge-guard direct.
+        """
+        vraag = self._discharge_target()
+        if vraag is None:
+            return
+        now = time.monotonic()
+        if now - self._track_fast_last < TRACK_FAST_THROTTLE_S:
+            return
+        if self.caps.p1_matching:
+            doel = min(max(vraag + TRACK_MARGE_W, self.caps.min_setpoint_w),
+                       self.params.p_discharge_max_w)
+            if doel <= self._tracked_outlim + TRACK_DEADBAND_W:
+                return  # alleen ophogen; verlagen doet de trage lus
+        else:
+            doel = min(vraag, self.params.p_discharge_max_w)
+            if doel <= self._last_discharge_w + TRACK_DEADBAND_W:
+                return
+        self._track_fast_last = now
+        self.hass.async_create_task(self._track_apply(doel))
+
+    async def _track_apply(self, doel_w: float) -> None:
+        if self.caps.p1_matching:
+            await A.set_power_number(self.hass, self.ent_zd_outlim, doel_w)
+            self._tracked_outlim = doel_w
+        else:
+            await self._set_battery("ontladen", doel_w, p1_cap=False)
+
+    async def _track_tick(self, _now) -> None:
+        """Trage volglus (elke TRACK_INTERVAL_S): ruimte terugnemen + promotie.
+
+        - ontladen: limiet/setpoint zakt weer mee met een afnemende vraag,
+          zodat het plan niet ongemerkt meer levert dan bedoeld;
         - laden (vast, dal-uur): verschijnt er intussen méér bronoverschot dan
-          het setpoint, promoveer dan direct naar surplus-matching i.p.v. op de
+          het setpoint, promoveer dan naar surplus-matching i.p.v. op de
           plan-tick te wachten.
-        Dode band voorkomt schrijf-spam; rust/EV blijven bij de guards.
+        Ophogen gebeurt event-gedreven in _track_fast.
         """
         if not self.control_enabled or self._tripped or self._ev_charging():
             return
         act = self._last_action
-        if act not in ("ontladen", "laden"):
-            return
-        p1 = self._fresh_power_w(self.ent_p1, 90)
-        if p1 is None:
-            return
-        ent_chg, ent_dis = self._bat_flow_entities()
         if act == "ontladen":
-            dis = self._fresh_power_w(ent_dis)
-            dis_now = dis if dis is not None else self._last_discharge_w
-            vraag = max(A.p1_without_battery(p1, discharge_w=dis_now), 0.0)
+            vraag = self._discharge_target()
+            if vraag is None:
+                return
             if self.caps.p1_matching:
                 doel = min(max(vraag + TRACK_MARGE_W, self.caps.min_setpoint_w),
                            self.params.p_discharge_max_w)
-                if abs(doel - self._tracked_outlim) >= TRACK_DEADBAND_W:
+                if doel <= self._tracked_outlim - TRACK_DEADBAND_W:
                     await A.set_power_number(self.hass, self.ent_zd_outlim, doel)
                     self._tracked_outlim = doel
             else:
                 doel = min(vraag, self.params.p_discharge_max_w)
-                if abs(doel - self._last_discharge_w) >= TRACK_DEADBAND_W:
+                if doel <= self._last_discharge_w - TRACK_DEADBAND_W:
                     await self._set_battery("ontladen", doel, p1_cap=False)
         elif act == "laden" and self.caps.surplus_mode:
+            p1 = self._fresh_power_w(self.ent_p1, 90)
+            if p1 is None:
+                return
+            ent_chg, _ = self._bat_flow_entities()
             chg = self._fresh_power_w(ent_chg)
             chg_now = chg if chg is not None else self._last_charge_w
             bron_export = -A.p1_without_battery(p1, charge_w=chg_now)
