@@ -29,9 +29,13 @@
           "ent_pv_tomorrow": "PV-opbrengst morgen (forecast)",
           "ent_zd_operation": "Accu operation-mode select",
           "ent_zd_manual": "Accu handmatig vermogen (number-entiteit)",
+          "ent_zd_inlim": "Accu input-limiet (laden, number-entiteit)",
+          "ent_zd_outlim": "Accu output-limiet (ontladen, number-entiteit)",
           "ent_zd_hems": "Accu HEMS/AI-modus status (binary_sensor)",
           "ent_zd_chg": "Accu laadvermogen sensor (optioneel)",
           "ent_zd_dis": "Accu ontlaadvermogen sensor (optioneel)",
+          "ent_bat_chg": "Accu laadvermogen sensor (optioneel, nodig voor watchdog)",
+          "ent_bat_dis": "Accu ontlaadvermogen sensor (optioneel, nodig voor watchdog)",
           "adapter": "Accumerk (adapter)",
           "ent_gen_power": "Generiek: signed vermogen-number (+W laden / -W ontladen)",
           "ent_gen_charge": "Generiek: laadvermogen-number (W)",
@@ -42,9 +46,16 @@
           "p_discharge_max_w": "Max ontlaadvermogen (W)",
           "ent_ms_mode": "Marstek: force-mode entity (select of number, 0=stop/1=laden/2=ontladen)",
           "ent_ms_charge": "Marstek: forcible laadvermogen-number (W)",
-          "ent_ms_discharge": "Marstek: forcible ontlaadvermogen-number (W)"
+          "ent_ms_discharge": "Marstek: forcible ontlaadvermogen-number (W)",
+          "verkoop_drempel_eur": "Verkoop-drempel (€/kWh kale verkoopprijs; verkoop-switch moet aan staan)"
         }
       }
+    },
+    "error": {
+      "invalid_number": "Eén van de numerieke waarden is geen geldig getal.",
+      "must_be_positive": "Moet groter zijn dan nul.",
+      "soc_out_of_range": "Minimale SoC moet tussen 0 en 100% liggen.",
+      "generic_power_missing": "De generieke adapter heeft een signed vermogen-number nodig, óf zowel een laad- als een ontlaad-number."
     }
   }
 }

@@ -29,9 +29,13 @@
           "ent_pv_tomorrow": "PV yield forecast tomorrow",
           "ent_zd_operation": "Battery operation mode select",
           "ent_zd_manual": "Battery manual power number entity",
+          "ent_zd_inlim": "Battery input (charge) limit number entity",
+          "ent_zd_outlim": "Battery output (discharge) limit number entity",
           "ent_zd_hems": "Battery HEMS / AI-mode status (binary_sensor)",
           "ent_zd_chg": "Battery charge power sensor (optional)",
           "ent_zd_dis": "Battery discharge power sensor (optional)",
+          "ent_bat_chg": "Battery charge power sensor (optional, enables watchdog)",
+          "ent_bat_dis": "Battery discharge power sensor (optional, enables watchdog)",
           "adapter": "Battery brand (adapter)",
           "ent_gen_power": "Generic: signed power number (+W charge / -W discharge)",
           "ent_gen_charge": "Generic: charge power number (W)",
@@ -42,9 +46,16 @@
           "p_discharge_max_w": "Max discharge power (W)",
           "ent_ms_mode": "Marstek: force mode entity (select or number, 0=stop/1=charge/2=discharge)",
           "ent_ms_charge": "Marstek: forcible charge power number (W)",
-          "ent_ms_discharge": "Marstek: forcible discharge power number (W)"
+          "ent_ms_discharge": "Marstek: forcible discharge power number (W)",
+          "verkoop_drempel_eur": "Sell threshold (€/kWh net sell price, sell switch must be on)"
         }
       }
+    },
+    "error": {
+      "invalid_number": "One of the numeric values is not a valid number.",
+      "must_be_positive": "Must be greater than zero.",
+      "soc_out_of_range": "Minimum SoC must be between 0 and 100%.",
+      "generic_power_missing": "Generic adapter needs a signed power number, or both a charge and a discharge number."
     }
   }
 }

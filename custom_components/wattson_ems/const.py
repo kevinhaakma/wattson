@@ -38,6 +38,12 @@ CONF_ENT_MS_MODE = "ent_ms_mode"
 CONF_ENT_MS_CHARGE = "ent_ms_charge"
 CONF_ENT_MS_DISCHARGE = "ent_ms_discharge"
 
+# telemetrie voor marstek/generic (optioneel): gemeten laad-/ontlaadvermogen
+# van de accu zelf. Zonder deze sensoren kan de watchdog op die adapters geen
+# runaway detecteren en wordt de huislast niet voor accu-vermogen gecorrigeerd.
+CONF_ENT_BAT_CHG = "ent_bat_chg"
+CONF_ENT_BAT_DIS = "ent_bat_dis"
+
 # accu-eigenschappen (instelbaar per installatie)
 CONF_CAPACITY = "capacity_kwh"
 CONF_MIN_SOC_PCT = "min_soc_pct"
@@ -89,6 +95,8 @@ DEFAULT_OPTIONS = {
     CONF_ENT_MS_MODE: "",
     CONF_ENT_MS_CHARGE: "",
     CONF_ENT_MS_DISCHARGE: "",
+    CONF_ENT_BAT_CHG: "",
+    CONF_ENT_BAT_DIS: "",
     CONF_CAPACITY: 5.76,
     CONF_MIN_SOC_PCT: 10,
     CONF_P_CHARGE: 1600,
@@ -111,6 +119,12 @@ DAGLICHT = (7, 21)         # uren waarbinnen de PV-bel wordt verdeeld
 WATCH_FRESH_S = 180        # meetwaarde ouder dan dit telt niet als bewijs
 WATCH_RUNAWAY_W = 300      # accuvermogen boven dit zonder opdracht = runaway
 GEENDATA_STOP_S = 600      # telemetrie zo lang stil met sturing aan -> veilig stoppen
+
+# discharge-guard (marstek/generic): het ontlaad-setpoint is daar een vast
+# vermogen; zakt de huisvraag, dan verlaagt deze altijd-actieve bewaking het
+# setpoint (nooit verhogen — dat doet de volgende plan-tick).
+DIS_GUARD_THROTTLE_S = 15
+DIS_GUARD_DEADBAND_W = 25
 
 # agressiviteit = plannings-slijtagegewicht (€/kWh doorzet): lager gewicht =
 # cyclen op kleinere prijsspreads. "gebalanceerd" is de getrainde waarde.

@@ -19,6 +19,8 @@ from .const import (
     ADAPTERS,
     CONF_ADAPTER,
     CONF_CAPACITY,
+    CONF_ENT_BAT_CHG,
+    CONF_ENT_BAT_DIS,
     CONF_ENT_GEN_CHARGE,
     CONF_ENT_GEN_DISCHARGE,
     CONF_ENT_GEN_POWER,
@@ -36,8 +38,10 @@ from .const import (
     CONF_ENT_ZD_CHG,
     CONF_ENT_ZD_DIS,
     CONF_ENT_ZD_HEMS,
+    CONF_ENT_ZD_INLIM,
     CONF_ENT_ZD_MANUAL,
     CONF_ENT_ZD_OPERATION,
+    CONF_ENT_ZD_OUTLIM,
     CONF_MIN_SOC_PCT,
     CONF_P_CHARGE,
     CONF_P_DISCHARGE,
@@ -45,6 +49,20 @@ from .const import (
     DEFAULT_OPTIONS,
     DOMAIN,
 )
+
+# optionele entity-velden per adapter: nodig om "leeg gelaten" te kunnen
+# onderscheiden van "niet in het formulier" (de selector laat een geleegd
+# veld weg uit user_input; zonder deze lijst kun je een optioneel veld
+# nooit meer wissen omdat de merge de oude waarde terugzet)
+_OPTIONAL_ENTITY_KEYS = {
+    None: [CONF_ENT_WALLBOX_1, CONF_ENT_WALLBOX_2],  # adapter-onafhankelijk
+    ADAPTER_ZENDURE: [CONF_ENT_ZD_HEMS, CONF_ENT_ZD_CHG, CONF_ENT_ZD_DIS],
+    ADAPTER_MARSTEK: [CONF_ENT_BAT_CHG, CONF_ENT_BAT_DIS],
+    ADAPTER_GENERIC: [
+        CONF_ENT_GEN_POWER, CONF_ENT_GEN_CHARGE, CONF_ENT_GEN_DISCHARGE,
+        CONF_ENT_BAT_CHG, CONF_ENT_BAT_DIS,
+    ],
+}
 
 
 def _ent(domain):
@@ -58,10 +76,12 @@ def _schema(options: dict) -> vol.Schema:
 
     def field(key, domain, required=True):
         """Required/Optional met dropdown; lege default weglaten (selector
-        accepteert geen lege string als suggested value)."""
+        accepteert geen lege string als suggested value). Required blijft
+        required, óók als er nog geen waarde staat — anders kan een kapotte
+        configuratie zonder stuur-entiteiten worden opgeslagen."""
         cur = d(key)
         kw = {"default": cur} if cur else {}
-        cls = vol.Required if required and cur else vol.Optional
+        cls = vol.Required if required else vol.Optional
         return (cls(key, **kw), _ent(domain))
 
     adapter = d(CONF_ADAPTER)
@@ -85,6 +105,8 @@ def _schema(options: dict) -> vol.Schema:
         pairs += [
             field(CONF_ENT_ZD_OPERATION, "select"),
             field(CONF_ENT_ZD_MANUAL, "number"),
+            field(CONF_ENT_ZD_INLIM, "number"),
+            field(CONF_ENT_ZD_OUTLIM, "number"),
             field(CONF_ENT_ZD_HEMS, "binary_sensor", required=False),
             field(CONF_ENT_ZD_CHG, "sensor", required=False),
             field(CONF_ENT_ZD_DIS, "sensor", required=False),
@@ -94,14 +116,48 @@ def _schema(options: dict) -> vol.Schema:
             field(CONF_ENT_MS_MODE, ["select", "number"]),
             field(CONF_ENT_MS_CHARGE, "number"),
             field(CONF_ENT_MS_DISCHARGE, "number"),
+            field(CONF_ENT_BAT_CHG, "sensor", required=False),
+            field(CONF_ENT_BAT_DIS, "sensor", required=False),
         ]
     else:
         pairs += [
             field(CONF_ENT_GEN_POWER, "number", required=False),
             field(CONF_ENT_GEN_CHARGE, "number", required=False),
             field(CONF_ENT_GEN_DISCHARGE, "number", required=False),
+            field(CONF_ENT_BAT_CHG, "sensor", required=False),
+            field(CONF_ENT_BAT_DIS, "sensor", required=False),
         ]
     return vol.Schema(dict(pairs))
+
+
+def _validate(merged: dict) -> dict[str, str]:
+    """Cross-veld-validatie; retourneert {veld_of_base: error_key}."""
+    errors: dict[str, str] = {}
+    try:
+        cap = float(merged.get(CONF_CAPACITY, 0))
+        min_soc = float(merged.get(CONF_MIN_SOC_PCT, 0))
+        p_chg = float(merged.get(CONF_P_CHARGE, 0))
+        p_dis = float(merged.get(CONF_P_DISCHARGE, 0))
+        sell = float(merged.get(CONF_SELL_THRESHOLD, 0))
+    except (TypeError, ValueError):
+        return {"base": "invalid_number"}
+    if cap <= 0:
+        errors[CONF_CAPACITY] = "must_be_positive"
+    if not 0 <= min_soc < 100:
+        errors[CONF_MIN_SOC_PCT] = "soc_out_of_range"
+    if p_chg <= 0:
+        errors[CONF_P_CHARGE] = "must_be_positive"
+    if p_dis <= 0:
+        errors[CONF_P_DISCHARGE] = "must_be_positive"
+    if sell < 0:
+        errors[CONF_SELL_THRESHOLD] = "must_be_positive"
+    adapter = merged.get(CONF_ADAPTER)
+    if adapter == ADAPTER_GENERIC:
+        has_signed = bool(merged.get(CONF_ENT_GEN_POWER))
+        has_pair = bool(merged.get(CONF_ENT_GEN_CHARGE)) and bool(merged.get(CONF_ENT_GEN_DISCHARGE))
+        if not (has_signed or has_pair):
+            errors["base"] = "generic_power_missing"
+    return errors
 
 
 class WattsonConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -146,6 +202,15 @@ class WattsonOptionsFlow(config_entries.OptionsFlow):
                 # opnieuw tonen met de velden van dat merk
                 self._shown_adapter = merged[CONF_ADAPTER]
                 return self.async_show_form(step_id="init", data_schema=_schema(merged))
+            # optionele velden die in het getoonde formulier stonden maar
+            # niet in user_input zitten, zijn door de gebruiker geleegd
+            for key in _OPTIONAL_ENTITY_KEYS[None] + _OPTIONAL_ENTITY_KEYS.get(self._shown_adapter, []):
+                if key not in user_input:
+                    merged[key] = ""
+            errors = _validate(merged)
+            if errors:
+                return self.async_show_form(
+                    step_id="init", data_schema=_schema(merged), errors=errors)
             return self.async_create_entry(title="", data=merged)
         opts = dict(self.config_entry.options)
         self._shown_adapter = opts.get(CONF_ADAPTER, ADAPTER_ZENDURE)
