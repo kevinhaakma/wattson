@@ -122,6 +122,14 @@ GEENDATA_STOP_S = 600      # telemetrie zo lang stil met sturing aan -> veilig s
 # de uitlopende 1592 W laden als runaway en tripte onnodig)
 WATCH_STOP_GRACE_S = 45
 
+# snelle volglus: werkt de stuurwaarden (outputlimiet / vaste setpoints) elke
+# TRACK_INTERVAL_S bij op de gemeten vraag, met een dode band tegen schrijf-
+# spam. Overbrugt het gat tussen de plan-ticks: een verbruikspiek bovenop het
+# uur-setpoint komt anders tot 10 min lang van het net op piekprijs.
+TRACK_INTERVAL_S = 30
+TRACK_DEADBAND_W = 100     # pas schrijven als het doel zoveel afwijkt
+TRACK_MARGE_W = 150        # limiet iets boven de vraag zodat matching kan ademen
+
 # discharge-guard (marstek/generic): het ontlaad-setpoint is daar een vast
 # vermogen; zakt de huisvraag, dan verlaagt deze altijd-actieve bewaking het
 # setpoint (nooit verhogen — dat doet de volgende plan-tick).

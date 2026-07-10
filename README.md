@@ -164,10 +164,18 @@ Optional measured charge/discharge sensors enable watchdog protection and allow
 Wattson to remove the battery's own power from the household-load estimate.
 
 Marstek and Generic controls use fixed setpoints rather than native P1
-matching. Wattson therefore runs a separate real-time discharge guard: when P1
-telemetry detects export, the guard lowers the discharge setpoint. For the
-strongest protection, also configure a hardware or vendor-app export limit when
-the battery supports one.
+matching. Wattson therefore runs a 30-second tracking loop that adjusts the
+discharge setpoint to actual household demand in both directions (software
+matching), plus a faster event-driven discharge guard that lowers the setpoint
+immediately when P1 telemetry detects export. For the strongest protection,
+also configure a hardware or vendor-app export limit when the battery supports
+one.
+
+On Zendure the same tracking loop follows demand with the device output limit,
+so a consumption spike above the planned setpoint is still served from the
+battery instead of the grid until the next replan; and when surplus appears
+during fixed valley charging, Wattson promotes to native surplus matching
+without waiting for the next replan.
 
 ### Adding a new brand adapter
 

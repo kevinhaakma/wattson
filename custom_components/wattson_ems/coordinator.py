@@ -92,6 +92,9 @@ from .const import (
     EV_THRESHOLD_KW,
     GEENDATA_STOP_S,
     SWITCH_DEADBAND_EUR,
+    TRACK_DEADBAND_W,
+    TRACK_INTERVAL_S,
+    TRACK_MARGE_W,
     UPDATE_MINUTES,
     WATCH_INTERVAL_S,
     WATCH_FRESH_S,
@@ -192,6 +195,7 @@ class WattsonCoordinator:
         self._last_discharge_w = 0.0   # laatst werkelijk toegepast ontlaadvermogen
         self._stop_grace_until = 0.0   # tot dit monotonic-moment is uitloop van
         self._stopped_richting: str | None = None  # ...deze richting geen runaway
+        self._tracked_outlim = 0.0     # laatst door de volglus geschreven outputlimiet
         self._dis_guard_last = 0.0
         self._switch_debt = 0.0        # opgeteld gemist voordeel van gedempte modewissels
         self._last_load_w: float | None = None  # huisvraag vorige tick (EV-sprong-detectie)
@@ -211,6 +215,9 @@ class WattsonCoordinator:
         # stilte-detectie mogen niet wachten op het her-plan-interval
         self.listeners.append(async_track_time_interval(
             self.hass, self._safety_tick, timedelta(seconds=WATCH_INTERVAL_S)))
+        # snelle volglus: stuurwaarden bijregelen op de gemeten vraag
+        self.listeners.append(async_track_time_interval(
+            self.hass, self._track_tick, timedelta(seconds=TRACK_INTERVAL_S)))
         self.listeners.append(async_track_state_change_event(
             self.hass, [self.ent_wallbox_1, self.ent_wallbox_2], self._ev_guard))
         if self.ent_p1:
@@ -490,6 +497,51 @@ class WattsonCoordinator:
                 "name": "Wattson",
                 "message": f"telemetrie > {GEENDATA_STOP_S / 60:.0f} min stil: accu veilig gestopt",
                 "entity_id": "sensor.wattson_advies", "domain": "wattson_ems"})
+
+    async def _track_tick(self, _now) -> None:
+        """Snelle volglus (elke TRACK_INTERVAL_S): stuurwaarden bij de vraag houden.
+
+        - ontladen (P1-matching): de outputlimiet volgt de werkelijke huisvraag
+          (+marge) i.p.v. het uur-setpoint, zodat een verbruikspiek bovenop het
+          plan uit de accu komt en niet tot de volgende plan-tick van het net;
+          matching zelf houdt export tegen, dus de limiet mag ademen.
+        - ontladen (vast setpoint, marstek/generic): het setpoint volgt de
+          huisvraag in béide richtingen (software-matching); de discharge-guard
+          blijft de snelle export-rem tussen twee lus-runs in.
+        - laden (vast, dal-uur): verschijnt er intussen méér bronoverschot dan
+          het setpoint, promoveer dan direct naar surplus-matching i.p.v. op de
+          plan-tick te wachten.
+        Dode band voorkomt schrijf-spam; rust/EV blijven bij de guards.
+        """
+        if not self.control_enabled or self._tripped or self._ev_charging():
+            return
+        act = self._last_action
+        if act not in ("ontladen", "laden"):
+            return
+        p1 = self._fresh_power_w(self.ent_p1, 90)
+        if p1 is None:
+            return
+        ent_chg, ent_dis = self._bat_flow_entities()
+        if act == "ontladen":
+            dis = self._fresh_power_w(ent_dis)
+            dis_now = dis if dis is not None else self._last_discharge_w
+            vraag = max(A.p1_without_battery(p1, discharge_w=dis_now), 0.0)
+            if self.caps.p1_matching:
+                doel = min(max(vraag + TRACK_MARGE_W, self.caps.min_setpoint_w),
+                           self.params.p_discharge_max_w)
+                if abs(doel - self._tracked_outlim) >= TRACK_DEADBAND_W:
+                    await A.set_power_number(self.hass, self.ent_zd_outlim, doel)
+                    self._tracked_outlim = doel
+            else:
+                doel = min(vraag, self.params.p_discharge_max_w)
+                if abs(doel - self._last_discharge_w) >= TRACK_DEADBAND_W:
+                    await self._set_battery("ontladen", doel, p1_cap=False)
+        elif act == "laden" and self.caps.surplus_mode:
+            chg = self._fresh_power_w(ent_chg)
+            chg_now = chg if chg is not None else self._last_charge_w
+            bron_export = -A.p1_without_battery(p1, charge_w=chg_now)
+            if bron_export > self._last_charge_w + 300:
+                await self._set_battery("laden_overschot", max(self._last_charge_w, 0.0))
 
     async def _safety_tick(self, _now) -> None:
         """Lichte bewakingslus (elke WATCH_INTERVAL_S): watchdog + stale-guard.
@@ -791,6 +843,9 @@ class WattsonCoordinator:
         self._last_action = action
         self._last_charge_w = applied if action in ("laden", "laden_overschot") else 0.0
         self._last_discharge_w = applied if action in ("ontladen", "verkopen") else 0.0
+        if action == "ontladen" and self.caps.p1_matching:
+            # referentie voor de volglus: dit is wat de adapter als limiet schreef
+            self._tracked_outlim = applied
 
     def _assist_source_p1(self, p1_w: float) -> float | None:
         """P1 zonder het effect van de lopende realtime-assist.
