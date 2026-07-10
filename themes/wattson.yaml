@@ -4,68 +4,69 @@
 # (of naar de map die je "themes:" folder in configuration.yaml noemt) en
 # selecteer "Wattson" bij Instellingen -> Weergave -> Thema.
 #
-# Donker thema met electric-blue/teal accenten, consistent met het Wattson-logo.
+# Donker thema op het Wattson-brandpalet:
+#   navy #0D1B2A · blauw #1565C0 · teal #00B4B0 · groen #22C55E · licht #F2F4F7
 
 Wattson:
   # ---------- basis ----------
   mode: dark
-  primary-color: "#2FD3FF"
-  accent-color: "#00E5A8"
-  dark-primary-color: "#0B2430"
+  primary-color: "#00B4B0"
+  accent-color: "#22C55E"
+  dark-primary-color: "#0D1B2A"
 
-  primary-background-color: "#0B0F14"
-  secondary-background-color: "#121821"
-  card-background-color: "#141C26"
-  clear-background-color: "#0B0F14"
+  primary-background-color: "#0A1521"
+  secondary-background-color: "#0F1E2D"
+  card-background-color: "#132539"
+  clear-background-color: "#0A1521"
 
-  primary-text-color: "#E8F6FA"
-  secondary-text-color: "#8FA6B2"
-  disabled-text-color: "#4A5A64"
-  divider-color: "#22303C"
+  primary-text-color: "#F2F4F7"
+  secondary-text-color: "#96A9BC"
+  disabled-text-color: "#4C6076"
+  divider-color: "#21374E"
 
   # ---------- ha-card ----------
   ha-card-background: "var(--card-background-color)"
   ha-card-border-radius: "16px"
   ha-card-border-width: "1px"
-  ha-card-border-color: "#22303C"
+  ha-card-border-color: "#21374E"
   ha-card-box-shadow: "0 2px 10px 0 rgba(0, 0, 0, 0.35)"
   ha-card-header-color: "var(--primary-text-color)"
 
   # ---------- app / header ----------
-  app-header-background-color: "#0B0F14"
-  app-header-text-color: "#E8F6FA"
-  app-header-edit-background-color: "#121821"
+  app-header-background-color: "#0A1521"
+  app-header-text-color: "#F2F4F7"
+  app-header-edit-background-color: "#0F1E2D"
 
   # ---------- sidebar ----------
-  sidebar-background-color: "#0B0F14"
-  sidebar-text-color: "#8FA6B2"
-  sidebar-icon-color: "#8FA6B2"
-  sidebar-selected-icon-color: "#2FD3FF"
-  sidebar-selected-text-color: "#2FD3FF"
-  sidebar-border-color: "#22303C"
+  sidebar-background-color: "#0A1521"
+  sidebar-text-color: "#96A9BC"
+  sidebar-icon-color: "#96A9BC"
+  sidebar-selected-icon-color: "#00B4B0"
+  sidebar-selected-text-color: "#00B4B0"
+  sidebar-border-color: "#21374E"
 
   # ---------- interactie ----------
-  primary-color-light: "#7AE6FF"
-  accent-color-light: "#5CF0CB"
+  primary-color-light: "#4DD6D2"
+  accent-color-light: "#6EE7A0"
   mdc-theme-primary: "var(--primary-color)"
-  switch-checked-color: "#00E5A8"
-  switch-unchecked-color: "#3A4650"
-  slider-color: "#2FD3FF"
-  slider-secondary-color: "#00E5A8"
-  paper-slider-knob-color: "#2FD3FF"
-  paper-slider-active-color: "#2FD3FF"
+  switch-checked-color: "#22C55E"
+  switch-unchecked-color: "#34495C"
+  slider-color: "#00B4B0"
+  slider-secondary-color: "#22C55E"
+  paper-slider-knob-color: "#00B4B0"
+  paper-slider-active-color: "#00B4B0"
 
   # ---------- states / badges ----------
-  state-active-color: "#00E5A8"
-  state-icon-active-color: "#2FD3FF"
-  label-badge-blue: "#2FD3FF"
-  label-badge-green: "#00E5A8"
+  state-active-color: "#22C55E"
+  state-icon-active-color: "#00B4B0"
+  label-badge-blue: "#1565C0"
+  label-badge-green: "#22C55E"
   label-badge-red: "#FF5C7A"
   label-badge-yellow: "#F5C542"
 
   # ---------- grafieken (o.a. wattson-card) ----------
-  energy-grid-consumption-color: "#2FD3FF"
-  energy-grid-return-color: "#00E5A8"
+  energy-grid-consumption-color: "#4C9BE8"
+  energy-grid-return-color: "#22C55E"
   energy-solar-color: "#F5C542"
-  energy-battery-in-color: "#00E5A8"
-  energy-battery-out-color: "#2FD3FF"
+  energy-battery-in-color: "#22C55E"
+  energy-battery-out-color: "#4C9BE8"

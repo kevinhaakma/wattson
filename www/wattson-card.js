@@ -23,6 +23,7 @@ class WattsonCard extends HTMLElement {
       entity: "sensor.wattson_advies",
       title: "Wattson",
       hours: 12,
+      icon: "/hacsfiles/wattson/wattson-icon.png",
       ...config,
     };
     this._built = false;
@@ -51,12 +52,7 @@ class WattsonCard extends HTMLElement {
       <ha-card>
         <div class="wc-header">
           <div class="wc-brand">
-            <svg class="wc-brand-icon" viewBox="0 0 256 256" aria-hidden="true">
-              <defs><linearGradient id="wc-energy" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#2F7FE2"/><stop offset="1" stop-color="#13B887"/></linearGradient></defs>
-              <rect x="104" y="20" width="48" height="28" rx="9" fill="url(#wc-energy)"/>
-              <rect x="48" y="40" width="160" height="192" rx="36" fill="url(#wc-energy)"/>
-              <path d="M151 66 92 151h34l-20 57 62-91h-35z" fill="#fff"/>
-            </svg>
+            <img class="wc-brand-icon" src="${this._config.icon}" alt="" aria-hidden="true">
             <span class="wc-title"></span>
           </div>
           <span class="wc-trained"></span>
@@ -254,9 +250,9 @@ class WattsonCard extends HTMLElement {
         font-weight: 700;
         line-height: 1.1;
       }
-      .wc-status-charge { color: var(--energy-battery-out-color, #2FD3FF); }
-      .wc-status-discharge { color: var(--energy-battery-in-color, #00E5A8); }
-      .wc-status-sell { color: var(--energy-grid-return-color, #FFB86B); }
+      .wc-status-charge { color: var(--energy-battery-out-color, #4C9BE8); }
+      .wc-status-discharge { color: var(--energy-battery-in-color, #22C55E); }
+      .wc-status-sell { color: #FFB86B; }
       .wc-status-idle { color: var(--secondary-text-color); }
       .wc-status-unknown { color: var(--warning-color, #F5C542); }
       .wc-stats {
@@ -293,8 +289,8 @@ class WattsonCard extends HTMLElement {
         stroke-width: 1;
         vector-effect: non-scaling-stroke;
       }
-      .wc-bar-charge { fill: var(--energy-battery-out-color, #2FD3FF); }
-      .wc-bar-discharge { fill: var(--energy-battery-in-color, #00E5A8); }
+      .wc-bar-charge { fill: var(--energy-battery-out-color, #4C9BE8); }
+      .wc-bar-discharge { fill: var(--energy-battery-in-color, #22C55E); }
       .wc-bar-idle { fill: var(--disabled-text-color, #555); opacity: 0.6; }
       .wc-tick {
         font-size: 6.5px;

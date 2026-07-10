@@ -1,15 +1,15 @@
 <div align="center">
 
-<img src="logo.svg" width="420" alt="Wattson — smart home battery control">
+<img src="logo.png" width="420" alt="Wattson — smart home battery control">
 
 # Wattson
 
 **Explainable smart home battery control for Home Assistant**
 
-[![HACS Custom](https://img.shields.io/badge/HACS-Custom-2FD3FF.svg?style=for-the-badge)](https://github.com/hacs/integration)
-[![Version](https://img.shields.io/badge/version-1.6.0-00E5A8.svg?style=for-the-badge)](#)
-[![License](https://img.shields.io/badge/license-MIT-2FD3FF.svg?style=for-the-badge)](#)
-[![Maintained](https://img.shields.io/badge/maintained-yes-00E5A8.svg?style=for-the-badge)](#)
+[![HACS Custom](https://img.shields.io/badge/HACS-Custom-1565C0.svg?style=for-the-badge)](https://github.com/hacs/integration)
+[![Version](https://img.shields.io/badge/version-1.6.0-00B4B0.svg?style=for-the-badge)](#)
+[![License](https://img.shields.io/badge/license-MIT-1565C0.svg?style=for-the-badge)](#)
+[![Maintained](https://img.shields.io/badge/maintained-yes-22C55E.svg?style=for-the-badge)](#)
 
 </div>
 
