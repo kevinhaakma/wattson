@@ -165,6 +165,27 @@ telemetry detects export, the guard lowers the discharge setpoint. For the
 strongest protection, also configure a hardware or vendor-app export limit when
 the battery supports one.
 
+### Adding a new brand adapter
+
+All brand-specific logic lives in `custom_components/wattson_ems/adapters.py`.
+The planner, watchdog, and guards are brand-independent and act on each
+adapter's declared capabilities rather than its name:
+
+- subclass `BatteryAdapter`, map your control entities, and implement
+  `apply(action, power_w)` (and optionally `emergency_stop` / `enforce_rest`
+  when the device has its own limit entities);
+- declare `AdapterCaps` honestly — `p1_matching` decides whether Wattson runs
+  its own export guard, `surplus_mode` whether solar-surplus assist can use a
+  native mode, and `min_setpoint_w` the smallest useful setpoint;
+- register the class in `create_adapter` and run the contract suite:
+  `python tests/contract_tests.py`. It exercises every adapter against a fake
+  Home Assistant: command translation, P1 capping, unit conversion (W/kW/MW),
+  emergency stops, and stale-telemetry handling. A new adapter is expected to
+  pass the same scenarios.
+
+Adapter requests with a working entity mapping (what does your battery expose
+in Home Assistant?) are welcome as GitHub issues.
+
 ## Entities created by Wattson
 
 - `sensor.wattson_advies` — current advice, with the plan, setpoint, inputs,
