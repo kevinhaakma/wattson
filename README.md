@@ -7,7 +7,7 @@
 **Slimme thuisaccu-sturing voor Home Assistant**
 
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-2FD3FF.svg?style=for-the-badge)](https://github.com/hacs/integration)
-[![version](https://img.shields.io/badge/version-1.5.0-00E5A8.svg?style=for-the-badge)](#)
+[![version](https://img.shields.io/badge/version-1.6.0-00E5A8.svg?style=for-the-badge)](#)
 [![license](https://img.shields.io/badge/license-MIT-2FD3FF.svg?style=for-the-badge)](#)
 [![maintained](https://img.shields.io/badge/maintained-yes-00E5A8.svg?style=for-the-badge)](#)
 
@@ -59,7 +59,7 @@ entiteiten aan te passen aan jouw installatie:
 
 | Optie | Betekenis |
 |---|---|
-| Prijs-sensor | dynamisch tarief, met een `forecast`-attribuut (uur-vooruitblik) |
+| Prijs-sensor | dynamisch tarief, met een `forecast`-attribuut (uur-vooruitblik). Ondersteund per forecast-item: Zonneplan (`datetime` + `electricity_price` × 1e7) of generiek (`datetime`/`start`/`from` + `price`/`value` in €/kWh) |
 | SoC-sensor | laadniveau van de accu in % |
 | P1-meter | huidig vermogen op de hoofdmeter |
 | Wallbox 1 / 2 | laadvermogen van je EV-lader(s), optioneel |
@@ -73,10 +73,14 @@ entiteiten aan te passen aan jouw installatie:
 
 - `sensor.wattson_advies` — huidig advies (`laden` / `ontladen` / `rust`),
   met het volledige plan en de rekenparameters als attributen.
-- `sensor.wattson_verwachte_besparing` — verwachte besparing (€) over de
-  planningshorizon t.o.v. geen accu.
+- `sensor.wattson_verwachte_besparing` ("verwacht planvoordeel") — kosten van
+  niets-doen minus plan-kosten over de horizon, symmetrisch verrekend (zelfde
+  start-SoC, zelfde eindwaarde voor restlading). Het voordeel van het plán,
+  geen kasstroom-garantie.
 - `switch.wattson_sturing` — master-switch. Uit = alleen advies (schaduwmodus).
   Aan = Wattson stuurt de accu daadwerkelijk aan.
+- `switch.wattson_bijspringen` — realtime piek/overschot-assist (v1.4).
+- `switch.wattson_verkopen` — exporteren boven de drempelprijs (v1.5).
 
 ## Wattson-kaart
 
@@ -224,3 +228,37 @@ Dit is de enige uitzondering op de "nooit exporteren"-regel:
   gecommandeerd is, dan gaan beide apparaat-limieten direct naar 0.
 - Limiet-waarden worden geclampt op het min/max van de number-entiteit, zodat
   een te hoge waarde de planning-tick niet meer laat falen.
+
+
+## Multi-brand hard gemaakt (v1.6)
+
+Alle veiligheidsranden die eerst alleen op Zendure klopten, gelden nu voor
+elk accumerk:
+
+- **Noodstops via de adapter-router.** Watchdog en stale-guard commanderen
+  `rust` in de taal van de geconfigureerde adapter; bij Zendure gaan daarna
+  gericht de apparaat-limieten dicht. De ingreep wordt geregistreerd en
+  gelogd vóórdat het stopcommando loopt.
+- **Telemetrie per adapter.** Voor marstek/generic zijn optionele laad-/
+  ontlaadvermogen-sensoren toe te wijzen; daarmee werken de watchdog en de
+  huislast-correctie ook daar. Zonder die sensoren velt de watchdog bewust
+  géén oordeel.
+- **Zendure-limiet-entiteiten instelbaar.** De input/output-limiet-numbers
+  staan nu in de opties in plaats van hardcoded defaults; de output-limiet
+  wordt bij ontladen bovendien begrensd op het geplande setpoint.
+- **Altijd actieve discharge-guard (marstek/generic).** Het vaste
+  ontlaadvermogen wordt realtime verlaagd zodra de P1 export toont
+  (throttled, verlaagt alleen; verhogen doet de volgende plan-tick). De
+  "nooit exporteren"-belofte hangt daar dus niet meer aan één momentopname.
+- **Lifecycle.** Bij unload/reload van de integratie gaat de accu naar rust
+  en wordt de herstart-retry netjes geannuleerd.
+- **Validatie in de options-flow.** Verplichte stuur-entiteiten blijven
+  verplicht, optionele velden zijn wisbaar, numerieke waarden en de
+  generic-configuratie worden gecontroleerd met duidelijke foutmeldingen.
+- **Tijd en prijsbron.** Alle lokale-tijd-logica gebruikt de HA-tijdzone
+  (niet de host-OS-tijdzone); de prijs-parser accepteert naast Zonneplan ook
+  generieke forecast-formaten, en een forecast die pas bij het volgende uur
+  begint wordt aangevuld met de actuele prijs voor het huidige uur.
+- **Eerlijker besparingscijfer.** Het besparing-sensor heet nu "verwacht
+  planvoordeel" en rekent symmetrisch (zelfde start-SoC en eindwaarde voor
+  beide paden); de entity-id blijft ongewijzigd.

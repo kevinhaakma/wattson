@@ -57,8 +57,12 @@ class WattsonAdviesSensor(SensorEntity):
 
 
 class WattsonBesparingSensor(SensorEntity):
-    _attr_name = "Wattson verwachte besparing"
-    _attr_unique_id = "wattson_verwachte_besparing"
+    """Verwacht planvoordeel: kosten van niets-doen minus plan-kosten over de
+    horizon, symmetrisch verrekend (zelfde start-SoC, zelfde eindwaarde voor
+    restlading). Dit is het voordeel van het plán, geen kasstroom-garantie."""
+
+    _attr_name = "Wattson verwacht planvoordeel"
+    _attr_unique_id = "wattson_verwachte_besparing"  # ongewijzigd: entity-id blijft stabiel
     _attr_icon = "mdi:currency-eur"
     _attr_native_unit_of_measurement = "EUR"
     _attr_should_poll = False

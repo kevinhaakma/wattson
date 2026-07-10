@@ -259,24 +259,47 @@ class WattsonCoordinator:
         return self.ent_bat_chg, self.ent_bat_dis
 
     def _price_forecast(self) -> list[tuple[datetime, float]]:
+        """Uur-forecast uit het forecast-attribuut van de prijs-sensor.
+
+        Ondersteunde contracten per forecast-item:
+        - Zonneplan: {"datetime": iso, "electricity_price": prijs x 1e7}
+        - generiek:  {"datetime"|"start"|"from": iso, "price"|"value": €/kWh}
+        Begint de forecast pas bij het volgende uur, dan wordt het huidige uur
+        aangevuld met de actuele sensorwaarde — anders zou het setpoint van
+        het volgende uur nu al uitgevoerd worden.
+        """
         st = self.hass.states.get(self.ent_price)
         if st is None:
             return []
-        now = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+        now = dt_util.utcnow().replace(minute=0, second=0, microsecond=0)
         out = []
         for item in st.attributes.get("forecast", []) or []:
+            if not isinstance(item, dict):
+                continue
             try:
-                dt = datetime.fromisoformat(str(item["datetime"]).replace("Z", "+00:00"))
-                price = float(item["electricity_price"]) / 1e7
+                t = item.get("datetime") or item.get("start") or item.get("from")
+                dt = datetime.fromisoformat(str(t).replace("Z", "+00:00"))
+                if item.get("electricity_price") is not None:
+                    price = float(item["electricity_price"]) / 1e7  # zonneplan-schaal
+                else:
+                    raw = item.get("price", item.get("value"))
+                    if raw is None:
+                        continue
+                    price = float(raw)  # al in €/kWh
             except (KeyError, ValueError, TypeError):
                 continue
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
             if dt >= now:
                 out.append((dt, price))
         out.sort(key=lambda x: x[0])
+        cur = self._f(self.ent_price)
         if not out:
-            cur = self._f(self.ent_price)
             if cur is not None:
                 out = [(now, cur)]
+        elif out[0][0] > now and cur is not None:
+            # forecast begint pas volgend uur: huidig uur expliciet toevoegen
+            out.insert(0, (now, cur))
         return out
 
     def _pv_curve(self, hours: list[datetime]) -> dict[datetime, float]:
@@ -284,7 +307,8 @@ class WattsonCoordinator:
         remain = (self._f(self.ent_pv_remain) or 0.0) * self.pv_bias
         tomorrow = (self._f(self.ent_pv_tomorrow) or 0.0) * self.pv_bias
         lo, hi = DAGLICHT
-        today = datetime.now(timezone.utc).astimezone().date()
+        # HA-tijdzone, niet de host-OS-tijdzone (docker draait vaak op UTC)
+        today = dt_util.now().date()
 
         def bell(h):  # gewicht per lokaal uur
             if h < lo or h >= hi:
@@ -293,8 +317,8 @@ class WattsonCoordinator:
 
         out = {}
         for day, budget in ((today, remain), (today + timedelta(days=1), tomorrow)):
-            day_hours = [dt for dt in hours if dt.astimezone().date() == day]
-            weights = [bell(dt.astimezone().hour) for dt in day_hours]
+            day_hours = [dt for dt in hours if dt_util.as_local(dt).date() == day]
+            weights = [bell(dt_util.as_local(dt).hour) for dt in day_hours]
             tot = sum(weights)
             for dt, w in zip(day_hours, weights):
                 out[dt] = (budget * w / tot * 1000.0) if tot > 0 else 0.0
@@ -446,7 +470,7 @@ class WattsonCoordinator:
 
     def _log_decision(self, prev) -> None:
         """Historie bijhouden en logbook-regel schrijven bij een wijziging."""
-        now = datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M")
+        now = dt_util.now().strftime("%Y-%m-%d %H:%M")
         if (self.advies, self.last_applied) == prev:
             return
         self.history.appendleft({
@@ -485,7 +509,7 @@ class WattsonCoordinator:
 
         steps = []
         for k, (dt, price) in enumerate(prices):
-            loc = dt.astimezone()
+            loc = dt_util.as_local(dt)
             weekend = loc.weekday() >= 5
             load = self.profile.get((loc.hour, int(weekend)), 0.35) * 1000.0
             if k == 0:
@@ -528,11 +552,15 @@ class WattsonCoordinator:
         # bijspringen mag alleen boven deze reserve
         eta = P.eta_oneway(self.params.p_discharge_max_w, self.params) or 1.0
         self.reserve_kwh = sum(-sp for sp in setpoints[1:] if sp < 0) / 1000.0 / eta
-        # kosten zonder accu over dezelfde horizon (voor het besparing-sensor)
+        # verwacht planvoordeel: kosten van niets-doen minus plan-kosten, over
+        # dezelfde horizon en symmetrisch verrekend — beide paden starten op de
+        # actuele SoC en krijgen dezelfde eindwaarde voor restlading (plan()
+        # trekt die zelf al af; niets-doen behoudt de volledige startlading)
         base = 0.0
         for s in steps:
-            c, _, _, _ = P.hour_result(s, 0.0, self.params.soc_min_kwh, self.params)
+            c, _, _, _ = P.hour_result(s, 0.0, soc, self.params)
             base += c
+        base -= (soc - self.params.soc_min_kwh) * tv
         self.expected_saving = round(base - cost, 2)
 
         sp = setpoints[0]
@@ -542,7 +570,7 @@ class WattsonCoordinator:
         for (dt, pr), a, st in list(zip(prices, setpoints, steps))[:16]:
             _, soc_sim, _, _ = P.hour_result(st, a, soc_sim, self.params)
             self.plan_hours.append({
-                "tijd": dt.astimezone().strftime("%H:%M"),
+                "tijd": dt_util.as_local(dt).strftime("%H:%M"),
                 "prijs": round(pr, 3),
                 "setpoint_w": round(a),
                 "soc_na_kwh": round(soc_sim, 2),
