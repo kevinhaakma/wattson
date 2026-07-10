@@ -93,6 +93,7 @@ from .const import (
     GEENDATA_STOP_S,
     SWITCH_DEADBAND_EUR,
     UPDATE_MINUTES,
+    WATCH_INTERVAL_S,
     WATCH_FRESH_S,
     WATCH_RUNAWAY_W,
     WATCH_STOP_GRACE_S,
@@ -206,6 +207,10 @@ class WattsonCoordinator:
     async def async_start(self) -> None:
         self.listeners.append(async_track_time_interval(
             self.hass, self._tick, timedelta(minutes=UPDATE_MINUTES)))
+        # veiligheidsbewaking los van de (tragere) plan-tick: runaway- en
+        # stilte-detectie mogen niet wachten op het her-plan-interval
+        self.listeners.append(async_track_time_interval(
+            self.hass, self._safety_tick, timedelta(seconds=WATCH_INTERVAL_S)))
         self.listeners.append(async_track_state_change_event(
             self.hass, [self.ent_wallbox_1, self.ent_wallbox_2], self._ev_guard))
         if self.ent_p1:
@@ -485,6 +490,24 @@ class WattsonCoordinator:
                 "name": "Wattson",
                 "message": f"telemetrie > {GEENDATA_STOP_S / 60:.0f} min stil: accu veilig gestopt",
                 "entity_id": "sensor.wattson_advies", "domain": "wattson_ems"})
+
+    async def _safety_tick(self, _now) -> None:
+        """Lichte bewakingslus (elke WATCH_INTERVAL_S): watchdog + stale-guard.
+
+        Los van de plan-tick zodat runaway-detectie en trip-opheffing niet op
+        het her-plan-interval hoeven te wachten. Doet zelf geen planning.
+        """
+        if not self.control_enabled:
+            return
+        prev_err = self.last_error
+        try:
+            await self._watchdog()
+        except Exception:  # noqa: BLE001 - bewaking mag nooit zelf crashen
+            _LOGGER.exception("Wattson safety-tick faalde")
+        await self._stale_guard()
+        if self.last_error != prev_err:
+            for s in self.sensors:
+                s.async_write_ha_state()
 
     async def _emergency_stop(self, richting: str | None) -> None:
         """Veilige stop, adapter-onafhankelijk.

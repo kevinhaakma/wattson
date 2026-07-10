@@ -336,9 +336,11 @@ Wattson in shadow mode, with an automation consuming its advice sensor.
 
 ### How often does Wattson replan?
 
-Every five minutes and immediately when the master switch or a planning option
-changes. Faster guards handle EV charging, unexpected P1 export, and optional
-real-time assistance.
+Every ten minutes and immediately when the master switch or a planning option
+changes. Faster layers are event-driven and independent of the replan
+interval: EV charging, unexpected P1 export, and optional real-time
+assistance react to meter events, and a dedicated safety loop runs the
+watchdog and stale-data guard every minute.
 
 ### Can Wattson guarantee zero export?
 

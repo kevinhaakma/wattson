@@ -106,7 +106,10 @@ ASSIST_THROTTLE_S = 30     # minimale tijd tussen assist-beslissingen
 ASSIST_SOC_MARGE_KWH = 0.15
 ASSIST_MAX_SOC_MARGIN_KWH = 0.05  # laad-assist stopt voor de absolute bovengrens
 ASSIST_POWER_DEADBAND_W = 50      # voorkom setpoint-calls voor meetruis
-UPDATE_MINUTES = 5         # her-plan interval
+UPDATE_MINUTES = 10        # her-plan interval; realtime werk (bijspringen,
+                           # EV-guard, discharge-guard) is event-gedreven en
+                           # de veiligheid draait apart op WATCH_INTERVAL_S
+WATCH_INTERVAL_S = 60      # eigen lichte bewakingslus (watchdog + stale-guard)
 DAGLICHT = (7, 21)         # uren waarbinnen de PV-bel wordt verdeeld
 
 # watchdog / robuustheid
