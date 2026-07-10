@@ -19,6 +19,10 @@ CONF_ENT_ZD_CHG = "ent_zd_chg"
 CONF_ENT_ZD_DIS = "ent_zd_dis"
 CONF_ENT_ZD_INLIM = "ent_zd_inlim"    # number.*_input_limit (max laadvermogen)
 CONF_ENT_ZD_OUTLIM = "ent_zd_outlim"  # number.*_output_limit (max ontlaadvermogen)
+# select.*_ac_mode: moet 'input' zijn om AC te laden en 'output' om te
+# ontladen; de Zendure-manager zet dit niet betrouwbaar zelf (incident
+# 2026-07-09 en 2026-07-10: accu laadde niet omdat ac_mode op output bleef)
+CONF_ENT_ZD_ACMODE = "ent_zd_acmode"
 
 # ---------- adapter (accumerk) ----------
 CONF_ADAPTER = "adapter"
@@ -75,6 +79,7 @@ DEFAULT_OPTIONS = {
     CONF_ENT_ZD_DIS: "",
     CONF_ENT_ZD_INLIM: "",
     CONF_ENT_ZD_OUTLIM: "",
+    CONF_ENT_ZD_ACMODE: "",
     CONF_ADAPTER: ADAPTER_ZENDURE,
     CONF_ENT_GEN_POWER: "",
     CONF_ENT_GEN_CHARGE: "",

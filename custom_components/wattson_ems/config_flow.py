@@ -35,6 +35,7 @@ from .const import (
     CONF_ENT_SOC,
     CONF_ENT_WALLBOX_1,
     CONF_ENT_WALLBOX_2,
+    CONF_ENT_ZD_ACMODE,
     CONF_ENT_ZD_CHG,
     CONF_ENT_ZD_DIS,
     CONF_ENT_ZD_HEMS,
@@ -59,7 +60,7 @@ _OPTIONAL_ENTITY_KEYS = {
         CONF_ENT_WALLBOX_1, CONF_ENT_WALLBOX_2,
         CONF_ENT_PV_NOW, CONF_ENT_PV_REMAIN, CONF_ENT_PV_TOMORROW,
     ],  # adapter-onafhankelijk
-    ADAPTER_ZENDURE: [CONF_ENT_ZD_HEMS, CONF_ENT_ZD_CHG, CONF_ENT_ZD_DIS],
+    ADAPTER_ZENDURE: [CONF_ENT_ZD_ACMODE, CONF_ENT_ZD_HEMS, CONF_ENT_ZD_CHG, CONF_ENT_ZD_DIS],
     ADAPTER_MARSTEK: [CONF_ENT_BAT_CHG, CONF_ENT_BAT_DIS],
     ADAPTER_GENERIC: [
         CONF_ENT_GEN_POWER, CONF_ENT_GEN_CHARGE, CONF_ENT_GEN_DISCHARGE,
@@ -108,6 +109,7 @@ def _adapter_schema(options: dict) -> vol.Schema:
             _field(options, CONF_ENT_ZD_MANUAL, "number"),
             _field(options, CONF_ENT_ZD_INLIM, "number"),
             _field(options, CONF_ENT_ZD_OUTLIM, "number"),
+            _field(options, CONF_ENT_ZD_ACMODE, "select", required=False),
             _field(options, CONF_ENT_ZD_HEMS, "binary_sensor", required=False),
             _field(options, CONF_ENT_ZD_CHG, "sensor", required=False),
             _field(options, CONF_ENT_ZD_DIS, "sensor", required=False),

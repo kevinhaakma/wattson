@@ -72,6 +72,7 @@ from .const import (
     CONF_ENT_WALLBOX_2,
     CONF_ENT_ZD_CHG,
     CONF_ENT_ZD_DIS,
+    CONF_ENT_ZD_ACMODE,
     CONF_ENT_ZD_HEMS,
     CONF_ENT_ZD_INLIM,
     CONF_ENT_ZD_MANUAL,
@@ -121,6 +122,7 @@ class WattsonCoordinator:
         self.ent_zd_dis = o(CONF_ENT_ZD_DIS)
         self.ent_zd_inlim = o(CONF_ENT_ZD_INLIM)
         self.ent_zd_outlim = o(CONF_ENT_ZD_OUTLIM)
+        self.ent_zd_acmode = o(CONF_ENT_ZD_ACMODE)
         self.adapter = o(CONF_ADAPTER)
         self.ent_gen_power = o(CONF_ENT_GEN_POWER)
         self.ent_gen_charge = o(CONF_ENT_GEN_CHARGE)

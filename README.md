@@ -122,6 +122,10 @@ It uses:
 - an operation-mode `select`;
 - a manual-power `number`;
 - charge and discharge limit `number` entities;
+- optionally the AC-mode `select` (strongly recommended: the device only
+  charges from AC while it is set to `input` and only discharges on `output`,
+  and Zendure's own manager does not switch it reliably — Wattson sets it to
+  match every charge/discharge command);
 - optional HEMS/AI-state and measured charge/discharge sensors.
 
 Normal discharge uses the device's native P1 matching. Wattson also limits the

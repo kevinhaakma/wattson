@@ -244,6 +244,22 @@ class ZendureAdapter(BatteryAdapter):
 
     async def _set_mode(self, mode, manual_w, dis_limit_w=None):
         c = self.c
+        # ac_mode zelf meesturen: het apparaat laadt alleen via AC als de
+        # ac_mode op 'input' staat en ontlaadt alleen op 'output'; de
+        # Zendure-manager zet dit niet betrouwbaar (incidenten 9 en 10 juli).
+        # Bij 'off' blijft de stand staan — geen richtingswissel nodig.
+        if c.ent_zd_acmode:
+            gewenst = None
+            if mode in ("smart_charging", "store_solar") or (mode == "manual" and manual_w < 0):
+                gewenst = "input"
+            elif mode in ("smart_discharging", "smart") or (mode == "manual" and manual_w > 0):
+                gewenst = "output"
+            if gewenst is not None:
+                cur_ac = c.hass.states.get(c.ent_zd_acmode)
+                if cur_ac is None or cur_ac.state != gewenst:
+                    await c.hass.services.async_call(
+                        "select", "select_option",
+                        {"entity_id": c.ent_zd_acmode, "option": gewenst}, blocking=True)
         # zorg dat de apparaatlimieten open staan voor de gevraagde richting
         # (een eerdere noodstop-0 blijft anders de sturing stil blokkeren);
         # na een noodstop opent alleen de niet-getripte richting

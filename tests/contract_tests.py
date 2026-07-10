@@ -63,8 +63,8 @@ class FakeCoordinator:
         self.last_applied = None
         defaults = dict(
             ent_p1="", ent_zd_operation="", ent_zd_manual="", ent_zd_inlim="",
-            ent_zd_outlim="", ent_zd_chg="", ent_zd_dis="", ent_ms_mode="",
-            ent_ms_charge="", ent_ms_discharge="", ent_gen_power="",
+            ent_zd_outlim="", ent_zd_acmode="", ent_zd_chg="", ent_zd_dis="",
+            ent_ms_mode="", ent_ms_charge="", ent_ms_discharge="", ent_gen_power="",
             ent_gen_charge="", ent_gen_discharge="", ent_bat_chg="", ent_bat_dis="",
         )
         defaults.update(entities)
@@ -151,6 +151,50 @@ def test_zendure():
     applied = run(ad.apply("verkopen", 1200.0))
     check("zendure: verkopen -> manual +800 W (max)",
           last_value(hass, "number.zd_manual") == 800.0 and applied == 800.0)
+
+    # ac_mode wordt meegestuurd: laden -> input, ontladen -> output,
+    # rust laat 'm staan; niet geconfigureerd -> geen calls
+    def make_zendure_ac(hass):
+        c = FakeCoordinator(
+            hass, ent_zd_operation="select.zd_op", ent_zd_manual="number.zd_manual",
+            ent_zd_inlim="number.zd_in", ent_zd_outlim="number.zd_out",
+            ent_zd_chg="sensor.zd_chg", ent_zd_dis="sensor.zd_dis")
+        c.ent_zd_acmode = "select.zd_acmode"
+        return c, A.create_adapter("zendure", c)
+
+    hass = zendure_hass()
+    hass._states["select.zd_acmode"] = FakeState("output", {"options": ["input", "output"]})
+    c, ad = make_zendure_ac(hass)
+    run(ad.apply("laden", 800.0))
+    ac = [d for d in hass.services.calls if d[2].get("entity_id") == "select.zd_acmode"]
+    check("zendure: laden stuurt ac_mode -> input", ac and ac[-1][2]["option"] == "input")
+
+    hass = zendure_hass()
+    hass._states["select.zd_acmode"] = FakeState("input", {"options": ["input", "output"]})
+    c, ad = make_zendure_ac(hass)
+    run(ad.apply("ontladen", 500.0))
+    ac = [d for d in hass.services.calls if d[2].get("entity_id") == "select.zd_acmode"]
+    check("zendure: ontladen stuurt ac_mode -> output", ac and ac[-1][2]["option"] == "output")
+
+    hass = zendure_hass()
+    hass._states["select.zd_acmode"] = FakeState("input", {"options": ["input", "output"]})
+    c, ad = make_zendure_ac(hass)
+    run(ad.apply("laden", 800.0))
+    ac = [d for d in hass.services.calls if d[2].get("entity_id") == "select.zd_acmode"]
+    check("zendure: ac_mode al goed -> geen overbodige call", not ac)
+
+    hass = zendure_hass()
+    hass._states["select.zd_acmode"] = FakeState("input", {"options": ["input", "output"]})
+    c, ad = make_zendure_ac(hass)
+    run(ad.apply("rust", 0.0))
+    ac = [d for d in hass.services.calls if d[2].get("entity_id") == "select.zd_acmode"]
+    check("zendure: rust laat ac_mode ongemoeid", not ac)
+
+    hass = zendure_hass()  # geen acmode-entity geconfigureerd
+    c, ad = make_zendure(hass)
+    run(ad.apply("laden", 800.0))
+    ac = [d for d in hass.services.calls if str(d[2].get("entity_id", "")).endswith("acmode")]
+    check("zendure: zonder ac_mode-entity geen ac_mode-calls", not ac)
 
     # rust: mode off én output-limiet dicht (sluiplek-fix), input blijft open
     hass = zendure_hass()
