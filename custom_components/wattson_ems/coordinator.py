@@ -85,8 +85,10 @@ from .const import (
     DEFAULT_OPTIONS,
     DIS_GUARD_DEADBAND_W,
     DIS_GUARD_THROTTLE_S,
+    EV_SUSPECT_JUMP_W,
     EV_THRESHOLD_KW,
     GEENDATA_STOP_S,
+    SWITCH_DEADBAND_EUR,
     UPDATE_MINUTES,
     WATCH_FRESH_S,
     WATCH_RUNAWAY_W,
@@ -181,6 +183,8 @@ class WattsonCoordinator:
         self._retry_cancel = None
         self._last_discharge_w = 0.0   # laatst gecommandeerd ontlaadvermogen (marstek/generic)
         self._dis_guard_last = 0.0
+        self._switch_debt = 0.0        # opgeteld gemist voordeel van gedempte modewissels
+        self._last_load_w: float | None = None  # huisvraag vorige tick (EV-sprong-detectie)
         self.listeners: list = []
         self.sensors: list = []
 
@@ -507,6 +511,8 @@ class WattsonCoordinator:
         return self.sell_enabled and (price - self.wedge) >= self.sell_threshold
 
     async def _plan_and_apply(self) -> None:
+        prev_advies = self.advies
+        prev_setpoint = self.setpoint_w
         prices = self._price_forecast()
         soc_pct = self._f(self.ent_soc)
         if not prices or soc_pct is None:
@@ -619,6 +625,43 @@ class WattsonCoordinator:
             else:
                 self.reden = "spread te klein binnen de horizon"
                 self.volgende_actie = None
+
+        # wissel-demping: een marginale modewissel (rust <-> laden/ontladen)
+        # gaat pas door als het cumulatieve voordeel de drempel overschrijdt.
+        # Het voordeel wordt exact bepaald met een extra DP-run waarin het
+        # eerste uur wordt vastgezet op de huidige stand; zo stopt het
+        # pendelen rond break-even zonder echte marge weg te geven.
+        stickable = ("rust", "laden", "ontladen")
+        if (prev_advies in stickable and self.advies in stickable
+                and self.advies != prev_advies and not ev_now and len(steps) > 1):
+            forced = 0.0 if prev_advies == "rust" else prev_setpoint
+            c0, soc1, _, _ = P.hour_result(steps[0], forced, soc, self.params)
+            _, rest = P.plan(steps[1:], soc1, self.params, terminal_value=tv)
+            voordeel = max((c0 + rest) - cost, 0.0)
+            self._switch_debt += voordeel
+            if self._switch_debt < SWITCH_DEADBAND_EUR:
+                self.reden = (f"houdt {prev_advies} vast — wissel naar {self.advies} "
+                              f"levert cumulatief €{self._switch_debt:.3f} op "
+                              f"(drempel €{SWITCH_DEADBAND_EUR:.2f})")
+                self.advies = prev_advies
+                self.setpoint_w = 0.0 if prev_advies == "rust" else prev_setpoint
+            else:
+                self._switch_debt = 0.0
+        else:
+            self._switch_debt = 0.0
+
+        # verdachte lastsprong: huisvraag springt hard omhoog zonder dat een
+        # wallbox het bevestigt -> mogelijk een EV-start met achterlopende
+        # vermogenstelemetrie; één tick niet ontladen tot er duidelijkheid is
+        vorige_last = self._last_load_w
+        self._last_load_w = steps[0].load_w
+        if (self.advies in ("ontladen", "verkopen") and not ev_now
+                and vorige_last is not None
+                and steps[0].load_w - vorige_last > EV_SUSPECT_JUMP_W):
+            self.advies = "rust (EV-check)"
+            self.setpoint_w = 0.0
+            self.reden = (f"lastsprong +{steps[0].load_w - vorige_last:.0f} W zonder "
+                          "wallbox-bevestiging — één tick wachten op EV-telemetrie")
 
         if not self.control_enabled or self._tripped:
             return
@@ -753,8 +796,12 @@ class WattsonCoordinator:
         """Auto begint te laden -> ontladen/verkopen direct stoppen."""
         if self.control_enabled and self._ev_charging() and (
                 self.advies in ("ontladen", "verkopen") or self.assist_active == "ontladen"):
+            prev = (self.advies, self.last_applied)
             self.assist_active = None
             self.hass.async_create_task(self._set_battery("rust", 0.0))
             self.advies = "rust (EV-guard)"
+            self.setpoint_w = 0.0
+            self.reden = "EV begon te laden — ontladen direct gestopt"
+            self._log_decision(prev)  # ingreep zichtbaar in het historie-attribuut
             for s in self.sensors:
                 s.async_write_ha_state()

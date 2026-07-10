@@ -215,6 +215,11 @@ class ZendureAdapter(BatteryAdapter):
             await self._set_mode("smart_discharging", 0.0, dis_limit_w=power_w)
             return power_w
         await self._set_mode("off", 0.0)
+        # sluiplek dicht: met een open output-limiet blijft het apparaat in
+        # 'off' ~50 W aan het huis leveren (±1,2 kWh/dag). De input-limiet
+        # blijft open zodat PV-opslag via de smart-modes mogelijk blijft;
+        # de eerstvolgende ontlaad-actie opent de output-limiet weer zelf.
+        await set_power_number(self.c.hass, self.c.ent_zd_outlim, 0)
         await self.enforce_rest()
         return 0.0
 

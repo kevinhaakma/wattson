@@ -113,6 +113,17 @@ GEENDATA_STOP_S = 600      # telemetrie zo lang stil met sturing aan -> veilig s
 DIS_GUARD_THROTTLE_S = 15
 DIS_GUARD_DEADBAND_W = 25
 
+# wissel-demping: een modewissel (rust <-> laden/ontladen) gaat pas door als
+# het CUMULATIEVE voordeel over de horizon deze drempel overschrijdt. Stopt
+# pendelen rond break-even-prijzen zonder echte marge weg te geven: het
+# gemiste voordeel telt per tick op en de wissel volgt zodra die loont.
+SWITCH_DEADBAND_EUR = 0.02
+
+# verdachte lastsprong: springt de huisvraag in één tick zoveel omhoog zonder
+# dat een wallbox het bevestigt, dan kan het een EV-start zijn waarvan de
+# vermogenssensor achterloopt (~1 min bij Keba/Tesla) -> één tick niet ontladen
+EV_SUSPECT_JUMP_W = 3000
+
 # agressiviteit = plannings-slijtagegewicht (€/kWh doorzet): lager gewicht =
 # cyclen op kleinere prijsspreads. "gebalanceerd" is de getrainde waarde.
 AGGRO_LEVELS = {"rustig": 0.05, "gebalanceerd": 0.02, "agressief": 0.005}

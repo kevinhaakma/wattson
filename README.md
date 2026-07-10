@@ -279,6 +279,18 @@ is at or above the configured selling threshold.
 This is the only intentional exception to Wattson's default no-battery-export
 rule.
 
+## Planning stability
+
+Around break-even prices the optimal choice between idle and (dis)charging can
+flip on every replan. Wattson damps these marginal switches economically
+instead of with a blunt hysteresis: when the planner wants a mode change, an
+extra planner run computes exactly what the switch is worth over the horizon.
+Below the threshold (€0.02) Wattson keeps its current state and accumulates
+the forgone advantage; the switch happens as soon as the cumulative benefit
+exceeds the threshold. Genuinely profitable actions (peak discharge, valley
+charging) pass immediately, and the maximum forgone margin per mode change is
+bounded by the threshold. Selling and all safety stops are never damped.
+
 ## Safety behavior
 
 - **Fresh-data watchdog.** Only telemetry updated within three minutes is used
@@ -290,7 +302,14 @@ rule.
 - **Idle enforcement.** Zendure limits are closed when fresh telemetry proves
   the battery remains active after an idle command.
 - **EV guard.** Discharge and selling stop when a configured EV charger becomes
-  active.
+  active. Guard interventions are recorded in the decision history.
+- **Suspected EV start.** Some charger power sensors lag by up to a minute.
+  When household load jumps by more than 3 kW within one cycle without wallbox
+  confirmation, Wattson defers discharging for one cycle until the telemetry
+  settles.
+- **No idle drain.** Commanded idle also closes the device discharge limit
+  (Zendure), preventing the battery from trickling ~50 W into the home while
+  it is supposed to rest.
 - **Safe unload.** Reloading or unloading the integration cancels retries and
   commands the battery to idle.
 - **Range clamping.** Values sent to number entities are clamped to their native

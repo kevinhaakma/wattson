@@ -152,6 +152,25 @@ def test_zendure():
     check("zendure: verkopen -> manual +800 W (max)",
           last_value(hass, "number.zd_manual") == 800.0 and applied == 800.0)
 
+    # rust: mode off én output-limiet dicht (sluiplek-fix), input blijft open
+    hass = zendure_hass()
+    hass._states["select.zd_op"] = FakeState("smart_discharging", {"options": []})
+    c, ad = make_zendure(hass)
+    applied = run(ad.apply("rust", 0.0))
+    sel = [d for d in hass.services.calls if d[1] == "select_option"]
+    check("zendure: rust -> operation off + output-limiet 0 (geen sluiplek)",
+          applied == 0.0 and sel and sel[-1][2]["option"] == "off"
+          and last_value(hass, "number.zd_out") == 0.0
+          and last_value(hass, "number.zd_in") is None)
+
+    # rust na ontladen: limiet gaat weer open bij de volgende ontlaad-actie
+    hass = zendure_hass()
+    c, ad = make_zendure(hass)
+    run(ad.apply("rust", 0.0))
+    run(ad.apply("ontladen", 500.0))
+    check("zendure: ontladen na rust heropent output-limiet",
+          last_value(hass, "number.zd_out") == 500.0)
+
     # noodstop: alleen de foute richting dicht
     hass = zendure_hass()
     c, ad = make_zendure(hass)
