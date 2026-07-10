@@ -80,6 +80,17 @@ def read_fresh_power_w(hass, entity: str, max_age_s: float, now_utc):
     return None if value is None else _to_watt(value, unit_of(hass, entity))
 
 
+def p1_without_battery(p1_w: float, *, charge_w: float = 0.0,
+                       discharge_w: float = 0.0) -> float:
+    """Reconstructeer de netflow voordat de accu daarop invloed had.
+
+    P1 is positief bij import en negatief bij export. Laden verhoogt P1 en
+    ontladen verlaagt P1; om de onderliggende huis-/PV-flow te bepalen moeten
+    die effecten dus respectievelijk worden afgetrokken en opgeteld.
+    """
+    return p1_w - max(charge_w, 0.0) + max(discharge_w, 0.0)
+
+
 async def set_number(hass, entity: str, value) -> None:
     """Zet een number-entity, geclampt op haar eigen min/max.
 
@@ -178,7 +189,22 @@ class BatteryAdapter:
     # gedeelde begrenzing: ontladen nooit boven de actuele netto-import
     def _p1_capped(self, power_w: float) -> float:
         p1 = read_power_w(self.c.hass, self.c.ent_p1)
-        return min(power_w, max(p1 or 0.0, 0.0))
+        if p1 is None:
+            return 0.0
+
+        # P1 bevat het effect van een reeds actief vast ontlaadsetpoint. Zonder
+        # correctie zou elke herhaalde plan-tick alleen de resterende import
+        # zien en het setpoint zichzelf stapsgewijs naar nul regelen. Verse
+        # telemetrie is leidend; zonder zo'n sensor is het laatst werkelijk
+        # toegepaste vaste setpoint de beste beschikbare reconstructie.
+        current_dis = 0.0
+        if getattr(self.c, "_last_action", None) in ("ontladen", "verkopen"):
+            _, ent_dis = self.telemetry_entities()
+            measured_dis = self.c._fresh_power_w(ent_dis, 120)
+            current_dis = (measured_dis if measured_dis is not None
+                           else max(getattr(self.c, "_last_discharge_w", 0.0), 0.0))
+        available = p1_without_battery(p1, discharge_w=current_dis)
+        return min(power_w, max(available, 0.0))
 
 
 class ZendureAdapter(BatteryAdapter):

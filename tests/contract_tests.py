@@ -60,6 +60,8 @@ class FakeCoordinator:
         self.hass = hass
         self.params = SimpleNamespace(p_charge_max_w=1600.0, p_discharge_max_w=800.0)
         self._tripped = None
+        self._last_action = None
+        self._last_discharge_w = 0.0
         self.last_applied = None
         defaults = dict(
             ent_p1="", ent_zd_operation="", ent_zd_manual="", ent_zd_inlim="",
@@ -342,6 +344,35 @@ def test_generic():
     check("generic: p1_cap=False laat delta-waarde door",
           applied == 650.0 and last_value(hass, "number.gp") == -650.0)
 
+    # herhaald plancommando ziet P1 na het bestaande ontlaadvermogen; dat
+    # vermogen moet worden teruggeteld om zelf-afbouw naar nul te voorkomen
+    hass, c, ad = make(ent_gen_power="number.gp")
+    hass._states["sensor.p1"] = FakeState("0", {"unit_of_measurement": "W"})
+    c._last_action = "ontladen"
+    c._last_discharge_w = 500.0
+    applied = run(ad.apply("ontladen", 800.0))
+    check("generic: herhaalde P1-cap behoudt bestaand ontlaadvermogen",
+          applied == 500.0 and last_value(hass, "number.gp") == -500.0)
+
+    # verse telemetrie gaat vóór het commando bij reconstructie van de bronlast
+    hass, c, ad = make(ent_gen_power="number.gp", ent_bat_dis="sensor.actual_dis")
+    hass._states["sensor.p1"] = FakeState("100", {"unit_of_measurement": "W"})
+    hass._states["sensor.actual_dis"] = FakeState("400", {"unit_of_measurement": "W"})
+    c._last_action = "ontladen"
+    c._last_discharge_w = 700.0
+    applied = run(ad.apply("ontladen", 800.0))
+    check("generic: P1-cap gebruikt verse werkelijke accuflow",
+          applied == 500.0 and last_value(hass, "number.gp") == -500.0)
+
+    # een recent maar niet meer actief meetpunt mag een nieuw commando niet
+    # kunstmatig vergroten: alleen de door Wattson beheerde actie telt terug
+    hass, c, ad = make(ent_gen_power="number.gp", ent_bat_dis="sensor.old_action")
+    hass._states["sensor.p1"] = FakeState("300", {"unit_of_measurement": "W"})
+    hass._states["sensor.old_action"] = FakeState("500", {"unit_of_measurement": "W"})
+    applied = run(ad.apply("ontladen", 800.0))
+    check("generic: P1-cap negeert telemetrie zonder actieve eigen ontlading",
+          applied == 300.0 and last_value(hass, "number.gp") == -300.0)
+
     # losse laad/ontlaad-numbers: laden zet ontladen op 0
     hass, c, ad = make(ent_gen_charge="number.gc", ent_gen_discharge="number.gd")
     run(ad.apply("laden", 900.0))
@@ -370,6 +401,13 @@ def test_telemetry_and_caps():
     chg_e, dis_e = ad.telemetry_entities()
     check("telemetrie: kW-sensor vers -> 450 W", c._fresh_power_w(chg_e) == 450.0)
     check("telemetrie: bevroren sensor -> None", c._fresh_power_w(dis_e) is None)
+
+    # regressie: nul op P1 is het resultaat van de accu, niet automatisch het
+    # einde van de oorspronkelijke piek of het oorspronkelijke zonoverschot
+    check("feedback: laden naar P1=0 behoudt onderliggend -800 W overschot",
+          A.p1_without_battery(0.0, charge_w=800.0) == -800.0)
+    check("feedback: ontladen naar P1=0 behoudt onderliggende +600 W piek",
+          A.p1_without_battery(0.0, discharge_w=600.0) == 600.0)
 
     z = A.create_adapter("zendure", FakeCoordinator(FakeHass({})))
     m = A.create_adapter("marstek", FakeCoordinator(FakeHass({})))

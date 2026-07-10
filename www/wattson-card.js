@@ -52,7 +52,10 @@ class WattsonCard extends HTMLElement {
       <ha-card>
         <div class="wc-header">
           <div class="wc-brand">
-            <img class="wc-brand-icon" src="${this._config.icon}" alt="" aria-hidden="true">
+            <button class="wc-icon-trigger wc-popup-trigger" type="button"
+                    aria-label="Open Wattson-details" title="Wat doet Wattson?">
+              <img class="wc-brand-icon" src="${this._config.icon}" alt="" aria-hidden="true">
+            </button>
             <span class="wc-title"></span>
           </div>
           <span class="wc-trained"></span>
@@ -65,10 +68,12 @@ class WattsonCard extends HTMLElement {
                 <span class="wc-stat-label">setpoint</span>
                 <span class="wc-stat-value wc-setpoint"></span>
               </div>
-              <div class="wc-stat">
+              <button class="wc-stat wc-soc-trigger wc-popup-trigger" type="button"
+                      aria-label="Open batterij- en Wattson-details" title="Wat doet Wattson?">
                 <span class="wc-stat-label">SoC</span>
                 <span class="wc-stat-value wc-soc"></span>
-              </div>
+                <span class="wc-stat-hint">details</span>
+              </button>
               <div class="wc-stat">
                 <span class="wc-stat-label">verwachte besparing</span>
                 <span class="wc-stat-value wc-besparing"></span>
@@ -78,8 +83,81 @@ class WattsonCard extends HTMLElement {
           <div class="wc-chart"></div>
           <div class="wc-note"></div>
         </div>
+        <div class="wc-dialog" role="dialog" aria-modal="true"
+             aria-labelledby="wc-dialog-title" hidden>
+          <div class="wc-dialog-shell">
+            <div class="wc-dialog-header">
+              <div class="wc-dialog-heading">
+                <img class="wc-dialog-icon" src="${this._config.icon}" alt="" aria-hidden="true">
+                <div>
+                  <div class="wc-dialog-eyebrow">Live batterijstatus</div>
+                  <div class="wc-dialog-title" id="wc-dialog-title">Wat doet Wattson?</div>
+                </div>
+              </div>
+              <button class="wc-dialog-close" type="button" aria-label="Sluiten">×</button>
+            </div>
+            <div class="wc-dialog-body">
+              <div class="wc-popup-hero">
+                <div>
+                  <div class="wc-popup-label">Actie</div>
+                  <div class="wc-popup-action"></div>
+                </div>
+                <div class="wc-popup-power"></div>
+              </div>
+              <div class="wc-popup-reason-wrap">
+                <div class="wc-popup-label">Waarom?</div>
+                <div class="wc-popup-reason"></div>
+              </div>
+              <div class="wc-popup-grid">
+                <div class="wc-popup-item"><span>SoC</span><strong class="wc-popup-soc"></strong></div>
+                <div class="wc-popup-item"><span>P1 netflow</span><strong class="wc-popup-p1"></strong></div>
+                <div class="wc-popup-item"><span>Huisvraag</span><strong class="wc-popup-house"></strong></div>
+                <div class="wc-popup-item"><span>PV nu</span><strong class="wc-popup-pv"></strong></div>
+                <div class="wc-popup-item"><span>Accu laadt</span><strong class="wc-popup-charge"></strong></div>
+                <div class="wc-popup-item"><span>Accu ontlaadt</span><strong class="wc-popup-discharge"></strong></div>
+                <div class="wc-popup-item"><span>Prijs nu</span><strong class="wc-popup-price"></strong></div>
+                <div class="wc-popup-item"><span>Reserve</span><strong class="wc-popup-reserve"></strong></div>
+              </div>
+              <div class="wc-popup-section">
+                <div class="wc-popup-line"><span>Gestuurd</span><strong class="wc-popup-command"></strong></div>
+                <div class="wc-popup-line"><span>Volgende actie</span><strong class="wc-popup-next"></strong></div>
+                <div class="wc-popup-line"><span>Bijspringen</span><strong class="wc-popup-assist"></strong></div>
+                <div class="wc-popup-line"><span>Sturing</span><strong class="wc-popup-control"></strong></div>
+                <div class="wc-popup-line"><span>Adapter</span><strong class="wc-popup-adapter"></strong></div>
+                <div class="wc-popup-line"><span>Bewaking</span><strong class="wc-popup-watch"></strong></div>
+              </div>
+              <div class="wc-popup-error" hidden></div>
+              <div class="wc-popup-history-wrap">
+                <div class="wc-popup-label">Laatste beslissingen</div>
+                <div class="wc-popup-history"></div>
+              </div>
+            </div>
+          </div>
+        </div>
       </ha-card>
     `;
+    const dialog = this._root.querySelector(".wc-dialog");
+    const closeDialog = () => {
+      dialog.hidden = true;
+      this._popupOpener?.focus();
+    };
+    this._root.querySelectorAll(".wc-popup-trigger").forEach((trigger) => {
+      trigger.addEventListener("click", () => {
+        this._popupOpener = trigger;
+        dialog.hidden = false;
+        this._root.querySelector(".wc-dialog-close").focus();
+      });
+    });
+    this._root.querySelector(".wc-dialog-close").addEventListener("click", closeDialog);
+    dialog.addEventListener("click", (event) => {
+      if (event.target === dialog) closeDialog();
+    });
+    dialog.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closeDialog();
+      }
+    });
     this._built = true;
   }
 
@@ -131,6 +209,76 @@ class WattsonCard extends HTMLElement {
     root.querySelector(".wc-chart").innerHTML = WattsonCard._chart(
       plan.slice(0, cfg.hours)
     );
+    this._updatePopup(advies, setpoint, attrs, inputs, soc);
+  }
+
+  _updatePopup(advies, setpoint, attrs, inputs, soc) {
+    const root = this._root;
+    const setText = (selector, value, fallback = "—") => {
+      root.querySelector(selector).textContent = value ?? fallback;
+    };
+    const watts = (value, signed = false) => {
+      if (value === undefined || value === null || Number.isNaN(Number(value))) return "—";
+      const number = Math.round(Number(value));
+      return `${signed && number > 0 ? "+" : ""}${number} W`;
+    };
+    const kwh = (value) => value === undefined || value === null
+      ? "—" : `${Number(value).toFixed(2)} kWh`;
+
+    const action = root.querySelector(".wc-popup-action");
+    action.textContent = WattsonCard._label(advies);
+    action.className = `wc-popup-action wc-status-${WattsonCard._statusClass(advies)}`;
+    setText(".wc-popup-power", watts(setpoint, true));
+    setText(".wc-popup-reason", attrs.reden);
+    setText(".wc-popup-soc", soc === undefined ? null
+      : `${kwh(soc)}${inputs.soc_pct === undefined ? "" : ` (${Number(inputs.soc_pct).toFixed(0)}%)`}`);
+    const p1Value = inputs.p1_nu_w;
+    setText(".wc-popup-p1", p1Value === undefined || p1Value === null
+      ? null
+      : `${Math.abs(Math.round(Number(p1Value)))} W ${Number(p1Value) > 0 ? "import" : Number(p1Value) < 0 ? "export" : "netto"}`);
+    setText(".wc-popup-house", watts(inputs.huislast_nu_w));
+    setText(".wc-popup-pv", watts(inputs.pv_nu_w));
+    setText(".wc-popup-charge", watts(inputs.accu_laden_w));
+    setText(".wc-popup-discharge", watts(inputs.accu_ontladen_w));
+    setText(".wc-popup-price", inputs.prijs_nu === undefined
+      ? null : `€ ${Number(inputs.prijs_nu).toFixed(3)}/kWh`);
+    setText(".wc-popup-reserve", kwh(attrs.reserve_kwh));
+    setText(".wc-popup-command", attrs.laatst_gestuurd);
+    setText(".wc-popup-next", attrs.volgende_actie, "nog niets gepland");
+    setText(".wc-popup-assist", attrs.bijspringen);
+    setText(".wc-popup-control", attrs.sturing_actief ? "actief" : "schaduwmodus");
+    setText(".wc-popup-adapter", attrs.adapter);
+    setText(".wc-popup-watch", [attrs.watchdog_telemetrie, attrs.export_guard].filter(Boolean).join(" · "));
+
+    const error = root.querySelector(".wc-popup-error");
+    error.hidden = !attrs.fout;
+    error.textContent = attrs.fout ? `⚠ ${attrs.fout}` : "";
+
+    const historyEl = root.querySelector(".wc-popup-history");
+    const history = Array.isArray(attrs.historie) ? attrs.historie.slice(0, 4) : [];
+    const rows = history.map((item) => {
+      const row = document.createElement("div");
+      row.className = "wc-history-row";
+      const top = document.createElement("div");
+      top.className = "wc-history-top";
+      const state = document.createElement("strong");
+      state.textContent = WattsonCard._label(item.advies);
+      const meta = document.createElement("span");
+      meta.textContent = `${item.tijd || ""}${item.setpoint_w === undefined ? "" : ` · ${watts(item.setpoint_w, true)}`}`;
+      top.append(state, meta);
+      const reason = document.createElement("div");
+      reason.className = "wc-history-reason";
+      reason.textContent = item.reden || item.gestuurd || "—";
+      row.append(top, reason);
+      return row;
+    });
+    if (!rows.length) {
+      const empty = document.createElement("div");
+      empty.className = "wc-history-empty";
+      empty.textContent = "Nog geen beslissingen vastgelegd";
+      rows.push(empty);
+    }
+    historyEl.replaceChildren(...rows);
   }
 
   static _label(advies) {
@@ -139,6 +287,10 @@ class WattsonCard extends HTMLElement {
       ontladen: "Ontladen",
       verkopen: "Verkopen",
       rust: "Rust",
+      "bijspringen: laden": "Bijspringen: laden",
+      "bijspringen: ontladen": "Bijspringen: ontladen",
+      "rust (EV-guard)": "Rust · EV-bewaking",
+      "rust (EV-check)": "Rust · EV-controle",
       init: "Bezig met plannen…",
       "geen data": "Geen data",
     };
@@ -146,10 +298,10 @@ class WattsonCard extends HTMLElement {
   }
 
   static _statusClass(advies) {
-    if (advies === "laden") return "charge";
-    if (advies === "ontladen") return "discharge";
+    if (advies === "laden" || advies === "bijspringen: laden") return "charge";
+    if (advies === "ontladen" || advies === "bijspringen: ontladen") return "discharge";
     if (advies === "verkopen") return "sell";
-    if (advies === "rust") return "idle";
+    if (advies === "rust" || String(advies).startsWith("rust (")) return "idle";
     return "unknown";
   }
 
@@ -215,6 +367,28 @@ class WattsonCard extends HTMLElement {
         gap: 9px;
         min-width: 0;
       }
+      .wc-icon-trigger {
+        appearance: none;
+        border: 0;
+        padding: 3px;
+        margin: -3px;
+        border-radius: 10px;
+        background: transparent;
+        color: inherit;
+        cursor: pointer;
+        line-height: 0;
+        transition: background 120ms ease, transform 120ms ease;
+      }
+      .wc-icon-trigger:hover {
+        background: color-mix(in srgb, var(--primary-color, #3987e5) 14%, transparent);
+        transform: translateY(-1px);
+      }
+      .wc-icon-trigger:focus-visible,
+      .wc-soc-trigger:focus-visible,
+      .wc-dialog-close:focus-visible {
+        outline: 2px solid var(--primary-color, #3987e5);
+        outline-offset: 2px;
+      }
       .wc-brand-icon {
         width: 30px;
         height: 30px;
@@ -264,6 +438,26 @@ class WattsonCard extends HTMLElement {
         flex-direction: column;
         align-items: flex-end;
       }
+      .wc-soc-trigger {
+        appearance: none;
+        border: 0;
+        border-radius: 8px;
+        margin: -4px;
+        padding: 4px;
+        background: transparent;
+        font: inherit;
+        cursor: pointer;
+        transition: background 120ms ease;
+      }
+      .wc-soc-trigger:hover {
+        background: color-mix(in srgb, var(--primary-color, #3987e5) 12%, transparent);
+      }
+      .wc-stat-hint {
+        margin-top: 1px;
+        font-size: 0.58rem;
+        line-height: 1;
+        color: var(--primary-color, #3987e5);
+      }
       .wc-stat-label {
         font-size: 0.65rem;
         text-transform: uppercase;
@@ -306,6 +500,194 @@ class WattsonCard extends HTMLElement {
         font-size: 0.7rem;
         color: var(--secondary-text-color);
         min-height: 1em;
+      }
+      .wc-dialog {
+        box-sizing: border-box;
+        position: fixed;
+        inset: 0;
+        z-index: 9999;
+        display: grid;
+        place-items: center;
+        padding: 14px;
+        color: var(--primary-text-color, #f4f6fb);
+        background: rgba(5, 10, 22, 0.68);
+      }
+      .wc-dialog[hidden] { display: none; }
+      .wc-dialog-shell {
+        box-sizing: border-box;
+        width: min(440px, calc(100vw - 28px));
+        max-height: min(760px, calc(100vh - 28px));
+        overflow: auto;
+        border-radius: 20px;
+        background: var(--card-background-color, #1c1c22);
+        box-shadow: 0 24px 80px rgba(0, 0, 0, 0.48);
+      }
+      .wc-dialog-header {
+        position: sticky;
+        top: 0;
+        z-index: 1;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+        padding: 18px 18px 14px;
+        background: color-mix(in srgb, var(--card-background-color, #1c1c22) 94%, transparent);
+        border-bottom: 1px solid var(--divider-color, #333);
+      }
+      .wc-dialog-heading {
+        display: flex;
+        align-items: center;
+        gap: 11px;
+        min-width: 0;
+      }
+      .wc-dialog-icon {
+        width: 36px;
+        height: 36px;
+        flex: 0 0 auto;
+      }
+      .wc-dialog-eyebrow,
+      .wc-popup-label {
+        font-size: 0.65rem;
+        line-height: 1.2;
+        letter-spacing: 0.07em;
+        text-transform: uppercase;
+        color: var(--secondary-text-color, #9aa);
+      }
+      .wc-dialog-title {
+        margin-top: 2px;
+        font-size: 1.08rem;
+        font-weight: 700;
+      }
+      .wc-dialog-close {
+        appearance: none;
+        width: 34px;
+        height: 34px;
+        border: 0;
+        border-radius: 50%;
+        background: color-mix(in srgb, var(--secondary-text-color, #9aa) 15%, transparent);
+        color: var(--primary-text-color, #fff);
+        font: 400 1.45rem/1 system-ui, sans-serif;
+        cursor: pointer;
+      }
+      .wc-dialog-body {
+        display: flex;
+        flex-direction: column;
+        gap: 14px;
+        padding: 16px 18px 20px;
+      }
+      .wc-popup-hero {
+        display: flex;
+        align-items: flex-end;
+        justify-content: space-between;
+        gap: 16px;
+        padding: 15px;
+        border: 1px solid color-mix(in srgb, var(--primary-color, #3987e5) 28%, transparent);
+        border-radius: 14px;
+        background: color-mix(in srgb, var(--primary-color, #3987e5) 9%, transparent);
+      }
+      .wc-popup-action {
+        margin-top: 3px;
+        font-size: 1.55rem;
+        font-weight: 750;
+      }
+      .wc-popup-power {
+        font-size: 1.1rem;
+        font-weight: 700;
+        white-space: nowrap;
+      }
+      .wc-popup-reason-wrap {
+        padding: 0 2px;
+      }
+      .wc-popup-reason {
+        margin-top: 4px;
+        font-size: 0.94rem;
+        line-height: 1.4;
+      }
+      .wc-popup-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 8px;
+      }
+      .wc-popup-item {
+        display: flex;
+        flex-direction: column;
+        gap: 3px;
+        min-width: 0;
+        padding: 10px 11px;
+        border-radius: 11px;
+        background: color-mix(in srgb, var(--secondary-text-color, #9aa) 9%, transparent);
+      }
+      .wc-popup-item span,
+      .wc-popup-line span {
+        font-size: 0.68rem;
+        color: var(--secondary-text-color, #9aa);
+      }
+      .wc-popup-item strong {
+        overflow: hidden;
+        font-size: 0.9rem;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .wc-popup-section {
+        border-top: 1px solid var(--divider-color, #333);
+        border-bottom: 1px solid var(--divider-color, #333);
+        padding: 7px 0;
+      }
+      .wc-popup-line {
+        display: grid;
+        grid-template-columns: 105px minmax(0, 1fr);
+        align-items: baseline;
+        gap: 12px;
+        padding: 5px 2px;
+      }
+      .wc-popup-line strong {
+        font-size: 0.78rem;
+        font-weight: 600;
+        text-align: right;
+        overflow-wrap: anywhere;
+      }
+      .wc-popup-error {
+        padding: 10px 12px;
+        border-radius: 10px;
+        background: color-mix(in srgb, var(--error-color, #db4437) 16%, transparent);
+        color: var(--error-color, #ff6b62);
+        font-size: 0.78rem;
+      }
+      .wc-popup-history-wrap {
+        display: flex;
+        flex-direction: column;
+        gap: 7px;
+      }
+      .wc-popup-history {
+        display: flex;
+        flex-direction: column;
+      }
+      .wc-history-row {
+        padding: 9px 2px;
+        border-bottom: 1px solid var(--divider-color, #333);
+      }
+      .wc-history-row:last-child { border-bottom: 0; }
+      .wc-history-top {
+        display: flex;
+        justify-content: space-between;
+        gap: 12px;
+        font-size: 0.75rem;
+      }
+      .wc-history-top span {
+        color: var(--secondary-text-color, #9aa);
+        text-align: right;
+      }
+      .wc-history-reason,
+      .wc-history-empty {
+        margin-top: 3px;
+        font-size: 0.72rem;
+        line-height: 1.35;
+        color: var(--secondary-text-color, #9aa);
+      }
+      @media (max-width: 440px) {
+        .wc-dialog-body { padding-inline: 14px; }
+        .wc-popup-grid { grid-template-columns: 1fr 1fr; }
+        .wc-popup-line { grid-template-columns: 90px minmax(0, 1fr); }
       }
     `;
   }

@@ -49,6 +49,8 @@ from . import planner as P
 from .const import (
     ASSIST_EXPORT_W,
     ASSIST_IMPORT_W,
+    ASSIST_MAX_SOC_MARGIN_KWH,
+    ASSIST_POWER_DEADBAND_W,
     ASSIST_SOC_MARGE_KWH,
     ASSIST_STOP_W,
     ASSIST_THROTTLE_S,
@@ -183,7 +185,9 @@ class WattsonCoordinator:
         self._data_ok_at: datetime | None = None
         self._safe_stopped = False
         self._retry_cancel = None
-        self._last_discharge_w = 0.0   # laatst gecommandeerd ontlaadvermogen (marstek/generic)
+        self._last_action: str | None = None
+        self._last_charge_w = 0.0      # laatst werkelijk toegepast laadvermogen
+        self._last_discharge_w = 0.0   # laatst werkelijk toegepast ontlaadvermogen
         self._dis_guard_last = 0.0
         self._switch_debt = 0.0        # opgeteld gemist voordeel van gedempte modewissels
         self._last_load_w: float | None = None  # huisvraag vorige tick (EV-sprong-detectie)
@@ -202,8 +206,12 @@ class WattsonCoordinator:
         self.listeners.append(async_track_state_change_event(
             self.hass, [self.ent_wallbox_1, self.ent_wallbox_2], self._ev_guard))
         if self.ent_p1:
+            ent_chg, ent_dis = self._bat_flow_entities()
+            assist_entities = list(dict.fromkeys(filter(None, (
+                self.ent_p1, self.ent_soc, ent_chg, ent_dis,
+            ))))
             self.listeners.append(async_track_state_change_event(
-                self.hass, [self.ent_p1], self._assist_check))
+                self.hass, assist_entities, self._assist_check))
             if not self.caps.p1_matching:
                 # vast-setpoint-adapters: altijd-actieve guard verlaagt het
                 # ontlaadvermogen zodra de huisvraag zakt
@@ -375,8 +383,12 @@ class WattsonCoordinator:
 
     def _expected_direction(self) -> tuple[bool, bool]:
         """(laden verwacht, ontladen verwacht) op basis van het actuele advies."""
-        chg = self.advies in ("laden", "bijspringen: laden")
-        dis = self.advies in ("ontladen", "verkopen", "bijspringen: ontladen")
+        # assist_active is de stuurwaarheid. Het advies kan tijdens een
+        # gelijktijdige plan-tick kort veranderen en mag de watchdog dan niet
+        # laten ingrijpen tegen een actie die Wattson zelf nog beheert.
+        chg = self.advies in ("laden", "bijspringen: laden") or self.assist_active == "laden"
+        dis = (self.advies in ("ontladen", "verkopen", "bijspringen: ontladen")
+               or self.assist_active == "ontladen")
         return chg, dis
 
     async def _watchdog(self) -> None:
@@ -515,6 +527,7 @@ class WattsonCoordinator:
     async def _plan_and_apply(self) -> None:
         prev_advies = self.advies
         prev_setpoint = self.setpoint_w
+        assist_reason = self.reden if self.assist_active else None
         prices = self._price_forecast()
         soc_pct = self._f(self.ent_soc)
         if not prices or soc_pct is None:
@@ -527,12 +540,16 @@ class WattsonCoordinator:
         ev_now = self._ev_charging()
 
         steps = []
+        p1_now = None
+        b_chg_now = 0.0
+        b_dis_now = 0.0
         for k, (dt, price) in enumerate(prices):
             loc = dt_util.as_local(dt)
             weekend = loc.weekday() >= 5
             load = self.profile.get((loc.hour, int(weekend)), 0.35) * 1000.0
             if k == 0:
                 p1 = self._power_w(self.ent_p1)
+                p1_now = p1
                 # De twee bronnen kunnen twee laders zijn, maar ook wallbox +
                 # voertuigtelemetrie van dezelfde sessie; max voorkomt dubbel tellen.
                 wb_w = max(
@@ -543,9 +560,22 @@ class WattsonCoordinator:
                     # actuele huisvraag excl. EV én excl. het eigen accuvermogen
                     # (anders ziet de planner zijn eigen laden als huislast)
                     ent_chg, ent_dis = self._bat_flow_entities()
-                    b_chg = self._power_w(ent_chg) or 0.0
-                    b_dis = self._power_w(ent_dis) or 0.0
-                    load = max(p1 - wb_w - b_chg + b_dis + (pv.get(dt, 0.0)), 0.0)
+                    b_chg = self._fresh_power_w(ent_chg, 120)
+                    b_dis = self._fresh_power_w(ent_dis, 120)
+                    # Zonder meettelemetrie kan een exact vast commando alsnog
+                    # worden teruggenomen. Native P1-matching gebruikt een
+                    # variabel vermogen; daarvoor is geen commando-fallback
+                    # mogelijk en blijft verse telemetrie vereist.
+                    if b_chg is None:
+                        b_chg = self._last_charge_w if self._last_action == "laden" else 0.0
+                    if b_dis is None:
+                        fixed_dis = self._last_action == "verkopen" or not self.caps.p1_matching
+                        b_dis = self._last_discharge_w if fixed_dis else 0.0
+                    b_chg_now = b_chg
+                    b_dis_now = b_dis
+                    load = max(A.p1_without_battery(
+                        p1, charge_w=b_chg, discharge_w=b_dis
+                    ) - wb_w + (pv.get(dt, 0.0)), 0.0)
             steps.append(P.Step(
                 price_imp=price,
                 price_exp=max(price - self.wedge, -0.5),
@@ -558,9 +588,13 @@ class WattsonCoordinator:
         tv = P.terminal_value_from_prices([s.price_imp for s in steps], self.params)
         self.inputs = {
             "soc_kwh": round(soc, 2),
+            "soc_pct": round(soc_pct, 1),
             "prijs_nu": round(steps[0].price_imp, 4),
+            "p1_nu_w": None if p1_now is None else round(p1_now),
             "huislast_nu_w": round(steps[0].load_w),
             "pv_nu_w": round(steps[0].pv_w),
+            "accu_laden_w": round(b_chg_now),
+            "accu_ontladen_w": round(b_dis_now),
             "pv_rest_vandaag_kwh": round((self._energy_kwh(self.ent_pv_remain) or 0.0) * self.pv_bias, 1),
             "pv_morgen_kwh": round((self._energy_kwh(self.ent_pv_tomorrow) or 0.0) * self.pv_bias, 1),
             "ev_laadt": ev_now,
@@ -675,7 +709,16 @@ class WattsonCoordinator:
                 return
         if self.advies == "laden":
             self.assist_active = None
-            await self._set_battery("laden", abs(self.setpoint_w))
+            # is er nú meer PV-overschot dan het geplande laadvermogen, gebruik
+            # dan native surplus-matching: die pakt het hele overschot (gratis,
+            # volgt wolken vanzelf) i.p.v. een vast setpoint dat de rest laat
+            # wegexporteren. Zakt het overschot onder het plan, dan schakelt de
+            # volgende tick terug naar vast (net-)laden tegen de dalprijs.
+            surplus_w = max(steps[0].pv_w - steps[0].load_w, 0.0)
+            if self.caps.surplus_mode and surplus_w >= abs(self.setpoint_w):
+                await self._set_battery("laden_overschot", abs(self.setpoint_w))
+            else:
+                await self._set_battery("laden", abs(self.setpoint_w))
         elif self.advies == "verkopen" and not ev_now:
             self.assist_active = None
             await self._set_battery("verkopen", abs(self.setpoint_w))
@@ -683,7 +726,16 @@ class WattsonCoordinator:
             self.assist_active = None
             await self._set_battery("ontladen", abs(self.setpoint_w))
         elif self.assist_active:
-            pass  # bijspringen loopt; de P1-listener beheert dit
+            # Het uurplan adviseert rust, maar de realtime-laag loopt nog. Houd
+            # advies/setpoint daarmee in lijn: anders kan de volgende watchdog
+            # de door Wattson zelf gestuurde activiteit als runaway beoordelen.
+            self.advies = f"bijspringen: {self.assist_active}"
+            if self.assist_active == "laden":
+                self.setpoint_w = round(self._last_charge_w)
+            else:
+                self.setpoint_w = -round(self._last_discharge_w)
+            if assist_reason:
+                self.reden = assist_reason
         else:
             await self._set_battery("rust", 0.0)
 
@@ -696,13 +748,36 @@ class WattsonCoordinator:
         """
         if action == "laden_overschot" and not self.caps.surplus_mode:
             action = "laden"  # geen native overschot-modus op dit merk
-        if action not in ("ontladen", "verkopen"):
-            self._last_discharge_w = 0.0
         applied = await self.adapter_impl.apply(action, power_w, p1_cap=p1_cap)
-        if action == "ontladen" and not self.caps.p1_matching:
-            # vast-setpoint-adapters: onthoud het werkelijk gecommandeerde
-            # vermogen voor de discharge-guard
-            self._last_discharge_w = applied
+        self._last_action = action
+        self._last_charge_w = applied if action in ("laden", "laden_overschot") else 0.0
+        self._last_discharge_w = applied if action in ("ontladen", "verkopen") else 0.0
+
+    def _assist_source_p1(self, p1_w: float) -> float | None:
+        """P1 zonder het effect van de lopende realtime-assist.
+
+        Bij native matching is het commando slechts een limiet en niet het
+        werkelijke vermogen. Zonder verse accutelemetrie kan Wattson dan niet
+        bewijzen dat de bronpiek/het bronoverschot voorbij is; None voorkomt
+        dat een succesvol naar nul geregelde P1 als stopbewijs wordt gebruikt.
+        Vaste adapters kunnen terugvallen op het werkelijk toegepaste setpoint.
+        """
+        ent_chg, ent_dis = self._bat_flow_entities()
+        if self.assist_active == "laden":
+            measured = self._fresh_power_w(ent_chg, 120)
+            if measured is not None:
+                return A.p1_without_battery(p1_w, charge_w=measured)
+            if self._last_action == "laden":  # fixed fallback (generic/marstek)
+                return A.p1_without_battery(p1_w, charge_w=self._last_charge_w)
+            return None
+        if self.assist_active == "ontladen":
+            measured = self._fresh_power_w(ent_dis, 120)
+            if measured is not None:
+                return A.p1_without_battery(p1_w, discharge_w=measured)
+            if not self.caps.p1_matching:
+                return A.p1_without_battery(p1_w, discharge_w=self._last_discharge_w)
+            return None
+        return p1_w
 
     @callback
     def _discharge_guard(self, _event) -> None:
@@ -762,30 +837,62 @@ class WattsonCoordinator:
         vrij = soc - self.params.soc_min_kwh - self.reserve_kwh - ASSIST_SOC_MARGE_KWH
         eta_rt = P.eta_oneway(800.0, self.params) ** 2
         prev = (self.advies, self.last_applied)
+        source_p1 = self._assist_source_p1(p1)
 
-        if self.assist_active == "ontladen" and (p1 < ASSIST_STOP_W or vrij <= 0 or self._ev_charging()):
+        peak_ended = source_p1 is not None and source_p1 < ASSIST_STOP_W
+        surplus_ended = source_p1 is not None and source_p1 > -ASSIST_STOP_W
+        charge_full = soc >= self.params.soc_max_kwh - ASSIST_MAX_SOC_MARGIN_KWH
+        discharge_economic = prijs > self._cheap_future / max(eta_rt, 0.5)
+        charge_economic = self._max_future * eta_rt > prijs
+        if self.assist_active == "ontladen" and (
+                peak_ended or vrij <= 0 or self._ev_charging() or not discharge_economic):
             self.assist_active = None
             await self._set_battery("rust", 0.0)
             self.advies = "rust"
-            self.reden = "bijspringen klaar (piek voorbij of reserve bereikt)"
-        elif self.assist_active == "laden" and p1 > -ASSIST_STOP_W:
+            self.setpoint_w = 0.0
+            self.reden = "bijspringen klaar (piek, reserve of prijsconditie voorbij)"
+        elif self.assist_active == "laden" and (
+                surplus_ended or charge_full or not charge_economic):
             self.assist_active = None
             await self._set_battery("rust", 0.0)
             self.advies = "rust"
-            self.reden = "bijspringen klaar (overschot voorbij)"
-        elif (self.assist_active in (None, "ontladen") and p1 > ASSIST_IMPORT_W
-              and not self._ev_charging() and vrij > 0
-              and prijs > self._cheap_future / max(eta_rt, 0.5)):
+            self.setpoint_w = 0.0
+            self.reden = ("bijspringen klaar (maximale SoC bereikt)" if charge_full
+                          else "bijspringen klaar (overschot of prijsconditie voorbij)")
+        elif self.assist_active == "ontladen":
+            if source_p1 is None:
+                return
+            target = min(max(source_p1, 0.0), self.params.p_discharge_max_w)
+            if abs(target - self._last_discharge_w) < ASSIST_POWER_DEADBAND_W:
+                return
+            await self._set_battery("ontladen", target, p1_cap=False)
+            self.setpoint_w = -round(self._last_discharge_w)
+            self.reden = f"piek volgt bronvraag {source_p1:.0f} W"
+        elif self.assist_active == "laden":
+            # Native surplus-matching regelt zelf continu. Vaste adapters
+            # krijgen hier een nieuw setpoint op basis van de bronflow, zodat
+            # een afnemend overschot niet ongemerkt netimport veroorzaakt.
+            if self.caps.surplus_mode or source_p1 is None:
+                return
+            target = min(max(-source_p1, 0.0), self.params.p_charge_max_w)
+            if abs(target - self._last_charge_w) < ASSIST_POWER_DEADBAND_W:
+                return
+            await self._set_battery("laden", target)
+            self.setpoint_w = round(self._last_charge_w)
+            self.reden = f"zonoverschot volgt bronexport {-source_p1:.0f} W"
+        elif (p1 > ASSIST_IMPORT_W and not self._ev_charging() and vrij > 0
+              and discharge_economic):
             self.assist_active = "ontladen"
             await self._set_battery("ontladen", min(p1, self.params.p_discharge_max_w))
             self.advies = "bijspringen: ontladen"
+            self.setpoint_w = -round(self._last_discharge_w)
             self.reden = f"piek {p1:.0f} W, prijs €{prijs:.3f} > herlaadprijs"
-        elif (self.assist_active in (None, "laden") and p1 < -ASSIST_EXPORT_W
-              and soc < self.params.soc_max_kwh - 0.2
-              and self._max_future * eta_rt > prijs):
+        elif (p1 < -ASSIST_EXPORT_W and soc < self.params.soc_max_kwh - 0.2
+              and charge_economic):
             self.assist_active = "laden"
             await self._set_battery("laden_overschot", min(-p1, self.params.p_charge_max_w))
             self.advies = "bijspringen: laden"
+            self.setpoint_w = round(self._last_charge_w)
             self.reden = f"zonoverschot {-p1:.0f} W, piek later €{self._max_future:.3f}"
         else:
             return

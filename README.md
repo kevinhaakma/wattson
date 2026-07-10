@@ -230,6 +230,10 @@ title: Wattson                 # Optional
 hours: 12                      # Optional number of plan hours
 ```
 
+Click the Wattson battery icon or the SoC value to open a live detail popup.
+It shows the current action and reason, P1/house/PV/battery power, reserve,
+the command sent to the adapter, protection state, and recent decisions.
+
 ## Theme and branding
 
 Copy [`themes/wattson.yaml`](themes/wattson.yaml) into your Home Assistant
@@ -266,6 +270,9 @@ layer above the hourly plan:
   reserve remains untouched.
 - **Solar-surplus assist** stores unexpected solar export when a more valuable
   future hour is available.
+- Start/stop decisions use the P1 flow reconstructed without Wattson's own
+  battery power. A battery that successfully brings grid flow close to zero
+  therefore no longer cancels its own assist action.
 - The EV guard always takes priority.
 - Hysteresis avoids rapid switching around the start and stop thresholds.
 

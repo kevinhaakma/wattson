@@ -104,6 +104,8 @@ ASSIST_EXPORT_W = 300      # export waarboven overschot-assist mag starten
 ASSIST_STOP_W = 150        # hysterese: daaronder stopt de assist
 ASSIST_THROTTLE_S = 30     # minimale tijd tussen assist-beslissingen
 ASSIST_SOC_MARGE_KWH = 0.15
+ASSIST_MAX_SOC_MARGIN_KWH = 0.05  # laad-assist stopt voor de absolute bovengrens
+ASSIST_POWER_DEADBAND_W = 50      # voorkom setpoint-calls voor meetruis
 UPDATE_MINUTES = 5         # her-plan interval
 DAGLICHT = (7, 21)         # uren waarbinnen de PV-bel wordt verdeeld
 

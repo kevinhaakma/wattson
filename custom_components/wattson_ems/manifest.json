@@ -1,7 +1,7 @@
 {
   "domain": "wattson_ems",
   "name": "Wattson \u2014 slimme thuisaccu",
-  "version": "1.6.0",
+  "version": "1.6.1",
   "config_flow": true,
   "documentation": "https://github.com/kevinhaakma/wattson",
   "issue_tracker": "https://github.com/kevinhaakma/wattson/issues",

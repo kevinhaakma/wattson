@@ -44,11 +44,17 @@ class WattsonControlSwitch(SwitchEntity, RestoreEntity):
         await self.coordinator._tick(None)
 
     async def async_turn_off(self, **kwargs):
+        was_assisting = self.coordinator.assist_active is not None
+        self.coordinator.assist_active = None
         self.coordinator.control_enabled = False
         self._attr_is_on = False
         self.async_write_ha_state()
         # bij uitzetten: accu in veilige ruststand
         await self.coordinator._set_battery("rust", 0.0)
+        if was_assisting:
+            self.coordinator.advies = "rust"
+            self.coordinator.setpoint_w = 0.0
+            self.coordinator.reden = "sturing uitgezet — assist gestopt"
 
 
 class WattsonAssistSwitch(SwitchEntity, RestoreEntity):
@@ -81,6 +87,9 @@ class WattsonAssistSwitch(SwitchEntity, RestoreEntity):
         if self.coordinator.assist_active:
             self.coordinator.assist_active = None
             await self.coordinator._set_battery("rust", 0.0)
+            self.coordinator.advies = "rust"
+            self.coordinator.setpoint_w = 0.0
+            self.coordinator.reden = "bijspringen uitgezet"
 
 
 class WattsonSellSwitch(SwitchEntity, RestoreEntity):
