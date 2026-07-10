@@ -9,6 +9,9 @@ Conventies:
 - prijzen in €/kWh; import = incl. belasting, export = wat teruglevering oplevert
 - de accu mag nooit naar het net exporteren (grid_reverse = forbidden):
   ontladen wordt per uur gemaximeerd op de netto huisvraag.
+  UITZONDERING: een uur met sell_ok=True (verkoopprijs boven de drempel én
+  verkopen expliciet aangezet) mag tot het maximale ontlaadvermogen leveren;
+  het surplus boven de huisvraag gaat tegen de exportprijs het net op.
 """
 
 
@@ -43,14 +46,15 @@ def eta_oneway(p_w, params):
 
 class Step:
     """Eén planningsuur."""
-    __slots__ = ("price_imp", "price_exp", "load_w", "pv_w", "ev_charging")
+    __slots__ = ("price_imp", "price_exp", "load_w", "pv_w", "ev_charging", "sell_ok")
 
-    def __init__(self, price_imp, price_exp, load_w, pv_w, ev_charging=False):
+    def __init__(self, price_imp, price_exp, load_w, pv_w, ev_charging=False, sell_ok=False):
         self.price_imp = price_imp
         self.price_exp = price_exp
         self.load_w = load_w
         self.pv_w = pv_w
         self.ev_charging = ev_charging
+        self.sell_ok = sell_ok
 
 
 def hour_result(step, action_w, soc_kwh, params):
@@ -84,6 +88,9 @@ def hour_result(step, action_w, soc_kwh, params):
         if step.ev_charging:
             # harde eis: nooit de auto vanuit de accu laden
             p = 0.0
+        elif step.sell_ok:
+            # verkopen: surplus boven de huisvraag mag het net op (exportprijs)
+            p = min(-action_w, params.p_discharge_max_w)
         else:
             p = min(-action_w, params.p_discharge_max_w, max(net_home, 0.0))
         eta = eta_oneway(p, params)

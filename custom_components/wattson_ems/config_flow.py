@@ -41,6 +41,7 @@ from .const import (
     CONF_MIN_SOC_PCT,
     CONF_P_CHARGE,
     CONF_P_DISCHARGE,
+    CONF_SELL_THRESHOLD,
     DEFAULT_OPTIONS,
     DOMAIN,
 )
@@ -78,6 +79,7 @@ def _schema(options: dict) -> vol.Schema:
         (vol.Required(CONF_MIN_SOC_PCT, default=d(CONF_MIN_SOC_PCT)), vol.Coerce(float)),
         (vol.Required(CONF_P_CHARGE, default=d(CONF_P_CHARGE)), vol.Coerce(float)),
         (vol.Required(CONF_P_DISCHARGE, default=d(CONF_P_DISCHARGE)), vol.Coerce(float)),
+        (vol.Required(CONF_SELL_THRESHOLD, default=d(CONF_SELL_THRESHOLD)), vol.Coerce(float)),
     ]
     if adapter == ADAPTER_ZENDURE:
         pairs += [

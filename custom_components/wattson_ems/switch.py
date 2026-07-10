@@ -14,7 +14,11 @@ async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
     coordinator = hass.data[DOMAIN][entry.entry_id]
-    async_add_entities([WattsonControlSwitch(coordinator), WattsonAssistSwitch(coordinator)])
+    async_add_entities([
+        WattsonControlSwitch(coordinator),
+        WattsonAssistSwitch(coordinator),
+        WattsonSellSwitch(coordinator),
+    ])
 
 
 class WattsonControlSwitch(SwitchEntity, RestoreEntity):
@@ -74,3 +78,34 @@ class WattsonAssistSwitch(SwitchEntity, RestoreEntity):
         if self.coordinator.assist_active:
             self.coordinator.assist_active = None
             await self.coordinator._set_battery("rust", 0.0)
+
+
+class WattsonSellSwitch(SwitchEntity, RestoreEntity):
+    """Verkopen: boven de drempelprijs mag de planner ontladen vóórbij de
+    huisvraag (= exporteren). Standaard uit; de drempel staat in de opties."""
+
+    _attr_name = "Wattson verkopen"
+    _attr_unique_id = "wattson_verkopen"
+    _attr_icon = "mdi:transmission-tower-export"
+
+    def __init__(self, coordinator):
+        self.coordinator = coordinator
+
+    async def async_added_to_hass(self):
+        await super().async_added_to_hass()
+        last = await self.async_get_last_state()
+        self.coordinator.sell_enabled = bool(last and last.state == "on")
+        self._attr_is_on = self.coordinator.sell_enabled
+
+    async def async_turn_on(self, **kwargs):
+        self.coordinator.sell_enabled = True
+        self._attr_is_on = True
+        self.async_write_ha_state()
+        await self.coordinator._tick(None)  # direct herplannen met verkoop-optie
+
+    async def async_turn_off(self, **kwargs):
+        self.coordinator.sell_enabled = False
+        self._attr_is_on = False
+        self.async_write_ha_state()
+        if self.coordinator.advies == "verkopen":
+            await self.coordinator._tick(None)  # herplannen zonder verkoop

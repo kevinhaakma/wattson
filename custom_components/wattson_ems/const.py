@@ -44,6 +44,11 @@ CONF_MIN_SOC_PCT = "min_soc_pct"
 CONF_P_CHARGE = "p_charge_max_w"
 CONF_P_DISCHARGE = "p_discharge_max_w"
 
+# verkopen: boven deze kale verkoopprijs (€/kWh, import minus wedge) mag de
+# planner ontladen vóórbij de huisvraag (= exporteren). Alleen actief met de
+# aparte "Wattson verkopen"-switch aan.
+CONF_SELL_THRESHOLD = "verkoop_drempel_eur"
+
 # ---------- defaults: de huidige entity-ids op deze installatie ----------
 DEFAULT_ENT_PRICE = "sensor.zonneplan_current_electricity_tariff"
 DEFAULT_ENT_SOC = "sensor.solarflow_2400_ac_electric_level"
@@ -88,6 +93,7 @@ DEFAULT_OPTIONS = {
     CONF_MIN_SOC_PCT: 10,
     CONF_P_CHARGE: 1600,
     CONF_P_DISCHARGE: 800,
+    CONF_SELL_THRESHOLD: 0.45,
 }
 
 EV_THRESHOLD_KW = 0.5      # daarboven telt als "auto laadt"
@@ -100,6 +106,11 @@ ASSIST_THROTTLE_S = 30     # minimale tijd tussen assist-beslissingen
 ASSIST_SOC_MARGE_KWH = 0.15
 UPDATE_MINUTES = 5         # her-plan interval
 DAGLICHT = (7, 21)         # uren waarbinnen de PV-bel wordt verdeeld
+
+# watchdog / robuustheid
+WATCH_FRESH_S = 180        # meetwaarde ouder dan dit telt niet als bewijs
+WATCH_RUNAWAY_W = 300      # accuvermogen boven dit zonder opdracht = runaway
+GEENDATA_STOP_S = 600      # telemetrie zo lang stil met sturing aan -> veilig stoppen
 
 # agressiviteit = plannings-slijtagegewicht (€/kWh doorzet): lager gewicht =
 # cyclen op kleinere prijsspreads. "gebalanceerd" is de getrainde waarde.

@@ -40,6 +40,11 @@ class WattsonAdviesSensor(SensorEntity):
             "reden": c.reden,
             "volgende_actie": c.volgende_actie,
             "bijspringen": c.assist_active or ("stand-by" if c.assist_enabled else "uit"),
+            "verkopen": (
+                "actief" if c.advies == "verkopen"
+                else f"gewapend (drempel €{c.sell_threshold:.2f})" if c.sell_enabled
+                else "uit"
+            ),
             "reserve_kwh": round(c.reserve_kwh, 2),
             "historie": list(c.history),
             "agressiviteit": c.aggressiveness,

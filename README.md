@@ -7,7 +7,7 @@
 **Slimme thuisaccu-sturing voor Home Assistant**
 
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-2FD3FF.svg?style=for-the-badge)](https://github.com/hacs/integration)
-[![version](https://img.shields.io/badge/version-1.4.0-00E5A8.svg?style=for-the-badge)](#)
+[![version](https://img.shields.io/badge/version-1.5.0-00E5A8.svg?style=for-the-badge)](#)
 [![license](https://img.shields.io/badge/license-MIT-2FD3FF.svg?style=for-the-badge)](#)
 [![maintained](https://img.shields.io/badge/maintained-yes-00E5A8.svg?style=for-the-badge)](#)
 
@@ -27,7 +27,8 @@ berekening die je live kunt volgen in Home Assistant.
   uren, ontladen op de dure — begrensd door accucapaciteit, laad-/ontlaadvermogen
   en een "waarde van morgen" zodat de accu niet leegdumpt op een matige piek.
 - **Nooit exporteren.** Ontladen wordt per uur gemaximeerd op de huisvraag; de
-  accu levert nooit terug aan het net.
+  accu levert nooit terug aan het net — tenzij je de aparte verkoop-switch
+  aanzet (zie [Verkopen, v1.5](#verkopen-v15)).
 - **EV-blokkade.** Zodra de wallbox (of auto) laadt, wordt ontladen direct
   gestopt — de auto mag nooit uit de accu geladen worden.
 - **Schaduwmodus.** Standaard publiceert Wattson alleen het advies (`rust` /
@@ -122,7 +123,9 @@ advies blijft wel zichtbaar) om dubbele sturing te voorkomen.
 Elke 5 minuten, en direct wanneer je de master-switch aanzet.
 
 **Kan de accu naar het net exporteren?**
-Nee. Ontladen wordt hard begrensd op de gemeten huisvraag.
+Standaard niet: ontladen wordt hard begrensd op de gemeten huisvraag. Alleen
+met `switch.wattson_verkopen` aan én een prijs boven de verkoop-drempel mag
+de planner bewust exporteren (zie v1.5).
 
 ## Disclaimer
 
@@ -189,3 +192,35 @@ Met `switch.wattson_bijspringen` aan reageert Wattson realtime (elke ~30 s) bove
   duurder uur in het verschiet ligt (bij Zendure via de native surplus-modus die het
   overschot op de P1 volgt).
 - EV-guard blijft altijd voorrang houden; hysterese voorkomt aan/uit-gependel.
+
+
+## Verkopen (v1.5)
+
+Met `switch.wattson_verkopen` aan (standaard **uit**) mag de planner in uren
+waarin de kale verkoopprijs (importprijs minus belasting/opslag) op of boven de
+**verkoop-drempel** ligt (optie op de integratie, standaard €0,45/kWh) ontladen
+vóórbij de huisvraag — het surplus gaat dan tegen de exportprijs het net op.
+Dit is de enige uitzondering op de "nooit exporteren"-regel:
+
+- Het advies toont dan `verkopen`; bij Zendure wordt een vast ontlaadvermogen
+  gezet (manual) in plaats van P1-matching.
+- De EV-guard houdt voorrang: zodra de auto laadt stopt ook verkopen direct.
+- `sensor.wattson_advies` krijgt het attribuut **verkopen**:
+  `actief` / `gewapend (drempel €…)` / `uit`.
+
+### Robuustere beveiliging (v1.5)
+
+- De **watchdog** oordeelt alleen nog op *verse* meetwaarden (jonger dan 3 min);
+  een bevroren of unavailable sensor triggert geen noodstop, maar heft er ook
+  geen op.
+- Een noodstop zet gericht de limiet van de foute richting dicht (laden →
+  input-limiet, ontladen → output-limiet) — op apparaatniveau, dus ook als de
+  operation-select al "off" toont. Na een noodstop opent de eerstvolgende
+  echte actie alleen de limiet die hij zelf nodig heeft.
+- **Stale-guard**: is álle telemetrie langer dan 10 min stil terwijl sturing
+  aan staat, dan gaat de accu eenmalig naar de veilige stand met beide
+  limieten op 0.
+- **Rust-handhaving**: meet de accu aantoonbaar activiteit terwijl rust
+  gecommandeerd is, dan gaan beide apparaat-limieten direct naar 0.
+- Limiet-waarden worden geclampt op het min/max van de number-entiteit, zodat
+  een te hoge waarde de planning-tick niet meer laat falen.

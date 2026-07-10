@@ -5,8 +5,25 @@ aan wordt het eerste planuur uitgevoerd:
 - laden      -> operation 'manual' + manual_power = -W  (negatief = laden)
 - ontladen   -> operation 'smart_discharging' (P1-matching: nooit export,
                 nooit meer dan de huisvraag)
+- verkopen   -> operation 'manual' + manual_power = +W  (vast vermogen,
+                exporteert boven de huisvraag; alleen boven de drempelprijs
+                en alleen met de verkoop-switch aan)
 - rust       -> operation 'off'
-EV-guard: zodra een wallbox laadt wordt ontladen direct gestopt.
+EV-guard: zodra een wallbox laadt wordt ontladen/verkopen direct gestopt.
+
+Robuustheid (v1.5):
+- alle besluiten over apparaatgedrag gebruiken VERSE data (last_updated-leeftijd);
+  een bevroren sensorwaarde is geen bewijs, dus geen noodstop en ook geen
+  opheffing daarvan op basis van stilstaande of unavailable telemetrie
+- de watchdog stopt een laad-runaway door de INPUT-limiet dicht te zetten en
+  een ontlaad-runaway via de OUTPUT-limiet (device-niveau: dat komt ook aan
+  als de manager-select al 'off' zegt)
+- na een noodstop blijven de limieten dicht; de eerstvolgende echte actie
+  opent alleen de limiet die die actie nodig heeft
+- 'rust' vertrouwt niet op de select-stand: meet de accu aantoonbaar activiteit
+  terwijl rust gecommandeerd is, dan gaan de apparaat-limieten direct op 0
+- blijft telemetrie langer dan GEENDATA_STOP_S stil terwijl sturing aan staat,
+  dan gaat de accu eenmalig naar de veilige stand
 """
 from __future__ import annotations
 
@@ -24,6 +41,7 @@ from homeassistant.helpers.event import (
     async_track_state_change_event,
     async_track_time_interval,
 )
+from homeassistant.util import dt as dt_util
 
 from . import planner as P
 from .const import (
@@ -60,10 +78,14 @@ from .const import (
     CONF_MIN_SOC_PCT,
     CONF_P_CHARGE,
     CONF_P_DISCHARGE,
+    CONF_SELL_THRESHOLD,
     DAGLICHT,
     DEFAULT_OPTIONS,
     EV_THRESHOLD_KW,
+    GEENDATA_STOP_S,
     UPDATE_MINUTES,
+    WATCH_FRESH_S,
+    WATCH_RUNAWAY_W,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -100,6 +122,7 @@ class WattsonCoordinator:
         self.ent_ms_mode = o(CONF_ENT_MS_MODE)
         self.ent_ms_charge = o(CONF_ENT_MS_CHARGE)
         self.ent_ms_discharge = o(CONF_ENT_MS_DISCHARGE)
+        self.sell_threshold = float(o(CONF_SELL_THRESHOLD))
 
         cfg = json.load(open(os.path.join(os.path.dirname(__file__), "params.json"), encoding="utf-8"))
         b = cfg["battery"]
@@ -122,8 +145,9 @@ class WattsonCoordinator:
 
         self.control_enabled = False   # master-switch (RestoreEntity zet dit terug)
         self.assist_enabled = False    # dynamisch bijspringen (aparte switch)
+        self.sell_enabled = False      # verkopen boven drempelprijs (aparte switch)
         self.assist_active: str | None = None
-        self._tripped = False
+        self._tripped: str | None = None   # None | "laden" | "ontladen" (richting van de runaway)
         self.reserve_kwh = 0.0
         self._cheap_future = 0.0
         self._max_future = 0.0
@@ -134,15 +158,23 @@ class WattsonCoordinator:
         self.plan_hours: list[dict] = []
         self.expected_saving = 0.0
         self.inputs: dict = {}
-        self.last_error: str | None = None
+        self.plan_error: str | None = None
+        self.watch_error: str | None = None
         self.last_applied: str | None = None
         self.reden: str = ""
         self.volgende_actie: str | None = None
         self.history: deque = deque(maxlen=50)
         self._had_success = False
+        self._data_ok_at: datetime | None = None
+        self._safe_stopped = False
         self._retry_cancel = None
         self.listeners: list = []
         self.sensors: list = []
+
+    # compat: het advies-sensor-attribuut 'fout' toont de ernstigste actuele fout
+    @property
+    def last_error(self) -> str | None:
+        return self.watch_error or self.plan_error
 
     # ---------- lifecycle ----------
     async def async_start(self) -> None:
@@ -166,6 +198,25 @@ class WattsonCoordinator:
             return None
         st = self.hass.states.get(entity)
         if st is None or st.state in ("unknown", "unavailable", None):
+            return None
+        try:
+            return float(st.state)
+        except ValueError:
+            return None
+
+    def _fresh(self, entity: str, max_age_s: float = WATCH_FRESH_S) -> float | None:
+        """Als _f, maar alleen als de waarde recent is bijgewerkt.
+
+        Een bevroren of unavailable sensor levert None: daarop mag geen
+        noodstop worden gebaseerd, maar ook geen opheffing ervan.
+        """
+        if not entity:
+            return None
+        st = self.hass.states.get(entity)
+        if st is None or st.state in ("unknown", "unavailable", None):
+            return None
+        age = (dt_util.utcnow() - st.last_updated).total_seconds()
+        if age > max_age_s:
             return None
         try:
             return float(st.state)
@@ -229,12 +280,13 @@ class WattsonCoordinator:
         try:
             await self._watchdog()
             await self._plan_and_apply()
-            self.last_error = None
+            self.plan_error = None
         except Exception as err:  # noqa: BLE001 - watchdog: nooit crashen, wel loggen
-            self.last_error = str(err)
+            self.plan_error = str(err)
             _LOGGER.exception("Wattson-tick faalde")
             if self.control_enabled:
                 await self._set_battery("rust", 0.0)  # veilige stand
+        await self._stale_guard()
         # zolang er nog geen geslaagd plan is (bronnen traag na herstart):
         # niet 5 minuten wachten maar elke 45 s opnieuw proberen
         if self.advies == "geen data" and not self._had_success:
@@ -246,46 +298,104 @@ class WattsonCoordinator:
         for s in self.sensors:
             s.async_write_ha_state()
 
+    def _expected_direction(self) -> tuple[bool, bool]:
+        """(laden verwacht, ontladen verwacht) op basis van het actuele advies."""
+        chg = self.advies in ("laden", "bijspringen: laden")
+        dis = self.advies in ("ontladen", "verkopen", "bijspringen: ontladen")
+        return chg, dis
+
     async def _watchdog(self) -> None:
         """Luistert-niet-detector: meet het werkelijke accuvermogen tegen wat
-        wij gecommandeerd hebben; bij grove afwijking -> noodstop + melding."""
+        wij gecommandeerd hebben; bij grove afwijking -> noodstop + melding.
+
+        Werkt uitsluitend op VERSE meetwaarden. De noodstop zet de limiet dicht
+        van de richting die fout zit (laden -> input, ontladen -> output); dat
+        is een apparaat-commando en werkt dus ook als de manager-select al
+        'off' staat. Opheffen gebeurt alleen op vers bewijs dat het vermogen
+        weer laag is, en zet limieten NIET terug open: de eerstvolgende echte
+        actie opent zelf de limiet die hij nodig heeft.
+        """
         if not self.control_enabled:
             return
-        dis = self._f(self.ent_zd_dis) or 0.0
-        chg = self._f(self.ent_zd_chg) or 0.0
-        verwacht_dis = self.advies in ("ontladen", "bijspringen: ontladen")
-        verwacht_chg = self.advies in ("laden", "bijspringen: laden")
+        dis = self._fresh(self.ent_zd_dis)
+        chg = self._fresh(self.ent_zd_chg)
+        if dis is None and chg is None:
+            return  # geen vers bewijs: geen oordeel
+        verwacht_chg, verwacht_dis = self._expected_direction()
         afwijking = None
-        if dis > 300 and not verwacht_dis:
-            afwijking = f"accu ontlaadt {dis:.0f} W terwijl '{self.advies}' gecommandeerd is"
-        elif chg > 300 and not verwacht_chg:
+        richting = None
+        if chg is not None and chg > WATCH_RUNAWAY_W and not verwacht_chg:
             afwijking = f"accu laadt {chg:.0f} W terwijl '{self.advies}' gecommandeerd is"
-        elif dis > self.params.p_discharge_max_w + 500:
+            richting = "laden"
+        elif dis is not None and dis > WATCH_RUNAWAY_W and not verwacht_dis:
+            afwijking = f"accu ontlaadt {dis:.0f} W terwijl '{self.advies}' gecommandeerd is"
+            richting = "ontladen"
+        elif dis is not None and dis > self.params.p_discharge_max_w + 500:
             afwijking = f"ontlaadvermogen {dis:.0f} W ver boven limiet"
+            richting = "ontladen"
         if afwijking:
-            self._tripped = True
+            self._tripped = richting
             self.assist_active = None
             await self._set_zendure("off", 0.0)
-            if self.adapter == ADAPTER_ZENDURE and self.ent_zd_outlim:
-                # ook op apparaatniveau dichtzetten (cloud kan traag zijn)
+            # limiet van de foute richting op apparaatniveau dichtzetten
+            # (bereikt het apparaat ook als de select al 'off' toonde)
+            if self.adapter == ADAPTER_ZENDURE:
                 try:
-                    await self.hass.services.async_call(
-                        "number", "set_value",
-                        {"entity_id": self.ent_zd_outlim, "value": 0}, blocking=True)
+                    if richting == "laden":
+                        await self._num(self.ent_zd_inlim, 0)
+                    else:
+                        await self._num(self.ent_zd_outlim, 0)
                 except Exception:  # noqa: BLE001
                     pass
-            self.last_error = f"WATCHDOG: {afwijking}"
+            self.watch_error = f"WATCHDOG: {afwijking}"
             _LOGGER.warning("Wattson watchdog: %s", afwijking)
             self.hass.bus.async_fire("logbook_entry", {
                 "name": "Wattson", "message": f"WATCHDOG ingegrepen: {afwijking}",
                 "entity_id": "sensor.wattson_advies", "domain": "wattson_ems"})
         elif self._tripped:
-            # runaway is voorbij: blokkade opheffen zodat normale sturing hervat
-            self._tripped = False
-            self.last_error = None
-            await self._restore_limits()
+            # alleen opheffen op vers bewijs dat de runaway-richting stil ligt
+            gestopt = (self._tripped == "laden" and chg is not None and chg < 50) or (
+                self._tripped == "ontladen" and dis is not None and dis < 50)
+            if gestopt:
+                self._tripped = None
+                self.watch_error = None
+                self.hass.bus.async_fire("logbook_entry", {
+                    "name": "Wattson", "message": "WATCHDOG opgeheven, sturing hervat",
+                    "entity_id": "sensor.wattson_advies", "domain": "wattson_ems"})
+
+    async def _stale_guard(self) -> None:
+        """Telemetrie te lang stil terwijl sturing aan staat -> eenmalig veilig stoppen.
+
+        Zonder verse SoC/vermogens is elke actieve stand blind vertrouwen op de
+        laatste opdracht; na GEENDATA_STOP_S gaat de accu naar rust met dichte
+        limieten tot er weer data is.
+        """
+        if not self.control_enabled:
+            return
+        vers = (
+            self._fresh(self.ent_soc, GEENDATA_STOP_S) is not None
+            or self._fresh(self.ent_zd_chg, GEENDATA_STOP_S) is not None
+            or self._fresh(self.ent_zd_dis, GEENDATA_STOP_S) is not None
+        )
+        now = dt_util.utcnow()
+        if vers:
+            self._data_ok_at = now
+            self._safe_stopped = False
+            return
+        if self._data_ok_at is None:
+            self._data_ok_at = now
+            return
+        if not self._safe_stopped and (now - self._data_ok_at).total_seconds() > GEENDATA_STOP_S:
+            self._safe_stopped = True
+            self.assist_active = None
+            await self._set_zendure("off", 0.0)
+            if self.adapter == ADAPTER_ZENDURE:
+                await self._num(self.ent_zd_inlim, 0)
+                await self._num(self.ent_zd_outlim, 0)
+            self.reden = "telemetrie stil — veilig gestopt"
             self.hass.bus.async_fire("logbook_entry", {
-                "name": "Wattson", "message": "WATCHDOG opgeheven, sturing hervat",
+                "name": "Wattson",
+                "message": f"telemetrie > {GEENDATA_STOP_S / 60:.0f} min stil: accu veilig gestopt",
                 "entity_id": "sensor.wattson_advies", "domain": "wattson_ems"})
 
     async def _retry(self, _now) -> None:
@@ -314,6 +424,10 @@ class WattsonCoordinator:
             })
         except Exception:  # noqa: BLE001 - logbook is nice-to-have
             pass
+
+    def _sell_ok(self, price: float) -> bool:
+        """Mag dit uur boven de huisvraag uit verkocht worden?"""
+        return self.sell_enabled and (price - self.wedge) >= self.sell_threshold
 
     async def _plan_and_apply(self) -> None:
         prices = self._price_forecast()
@@ -347,6 +461,7 @@ class WattsonCoordinator:
                 load_w=load,
                 pv_w=pv.get(dt, 0.0),
                 ev_charging=ev_now if k == 0 else False,
+                sell_ok=self._sell_ok(price),
             ))
 
         tv = P.terminal_value_from_prices([s.price_imp for s in steps], self.params)
@@ -360,6 +475,7 @@ class WattsonCoordinator:
             "ev_laadt": ev_now,
             "horizon_uren": len(steps),
             "eindwaarde_restlading": round(tv, 3),
+            "verkoop_drempel": self.sell_threshold if self.sell_enabled else None,
         }
         setpoints, cost = P.plan(steps, soc, self.params, terminal_value=tv)
         prices_only = [s2.price_imp for s2 in steps]
@@ -397,8 +513,15 @@ class WattsonCoordinator:
             self.reden = f"goedkoop uur (€{steps[0].price_imp:.3f})"
             self.volgende_actie = None
         elif sp < -50:
-            self.advies = "ontladen"
-            self.reden = f"duur uur (€{steps[0].price_imp:.3f}), huis vraagt {steps[0].load_w:.0f} W"
+            # ontladen boven de actuele netto-huisvraag kan alleen verkopen zijn
+            net_home = max(steps[0].load_w - steps[0].pv_w, 0.0)
+            if steps[0].sell_ok and -sp > net_home + 100:
+                self.advies = "verkopen"
+                self.reden = (f"verkoopprijs €{steps[0].price_imp - self.wedge:.3f} "
+                              f">= drempel €{self.sell_threshold:.2f}")
+            else:
+                self.advies = "ontladen"
+                self.reden = f"duur uur (€{steps[0].price_imp:.3f}), huis vraagt {steps[0].load_w:.0f} W"
             self.volgende_actie = None
         else:
             self.advies = "rust"
@@ -421,6 +544,9 @@ class WattsonCoordinator:
         if self.advies == "laden":
             self.assist_active = None
             await self._set_battery("laden", abs(self.setpoint_w))
+        elif self.advies == "verkopen" and not ev_now:
+            self.assist_active = None
+            await self._set_battery("verkopen", abs(self.setpoint_w))
         elif self.advies == "ontladen" and not ev_now:
             self.assist_active = None
             await self._set_battery("ontladen", abs(self.setpoint_w))
@@ -430,7 +556,7 @@ class WattsonCoordinator:
             await self._set_battery("rust", 0.0)
 
     async def _set_battery(self, action: str, power_w: float) -> None:
-        """Adapter-router: vertaal laden/ontladen/rust naar het accumerk."""
+        """Adapter-router: vertaal laden/ontladen/verkopen/rust naar het accumerk."""
         if action == "laden_overschot" and self.adapter != ADAPTER_ZENDURE:
             action = "laden"  # alleen zendure heeft een native overschot-modus
         if self.adapter == ADAPTER_ZENDURE:
@@ -439,22 +565,30 @@ class WattsonCoordinator:
                 await self._set_zendure("smart_charging", 0.0)
             elif action == "laden":
                 await self._set_zendure("manual", -power_w)
+            elif action == "verkopen":
+                # vast ontlaadvermogen; wat het huis niet opneemt gaat het net op
+                await self._set_zendure("manual", min(power_w, self.params.p_discharge_max_w))
             elif action == "ontladen":
                 # smart_discharging = P1-matching van de Zendure zelf: volgt de
                 # huisvraag en kan dus nooit exporteren
                 await self._set_zendure("smart_discharging", 0.0)
             else:
                 await self._set_zendure("off", 0.0)
+                await self._enforce_rest()
             return
         if self.adapter == ADAPTER_MARSTEK:
             await self._set_marstek(action, power_w)
             return
         # generiek: number-entiteiten; ontladen wordt begrensd op de actuele
-        # netto-import zodat de accu nooit naar het net exporteert
+        # netto-import zodat de accu nooit naar het net exporteert; verkopen
+        # is expliciet onbegrensd (tot het maximum)
         if action == "ontladen":
             p1 = self._f(self.ent_p1)
             power_w = min(power_w, max(p1 or 0.0, 0.0))
-        signed = power_w if action == "laden" else (-power_w if action == "ontladen" else 0.0)
+        signed = (
+            power_w if action == "laden"
+            else (-power_w if action in ("ontladen", "verkopen") else 0.0)
+        )
         if self.ent_gen_power:
             await self.hass.services.async_call(
                 "number", "set_value", {"entity_id": self.ent_gen_power, "value": signed}, blocking=True)
@@ -479,14 +613,17 @@ class WattsonCoordinator:
         if action == "ontladen":
             p1 = self._f(self.ent_p1)
             power_w = min(power_w, max(p1 or 0.0, 0.0))
+        if action == "verkopen":
+            # verkopen = ontladen zonder P1-cap
+            power_w = min(power_w, self.params.p_discharge_max_w)
         # eerst het vermogen zetten, dan de mode (volgorde die het apparaat verwacht)
         if action == "laden" and self.ent_ms_charge:
             await self.hass.services.async_call(
                 "number", "set_value", {"entity_id": self.ent_ms_charge, "value": power_w}, blocking=True)
-        if action == "ontladen" and self.ent_ms_discharge:
+        if action in ("ontladen", "verkopen") and self.ent_ms_discharge:
             await self.hass.services.async_call(
                 "number", "set_value", {"entity_id": self.ent_ms_discharge, "value": power_w}, blocking=True)
-        mode_idx = {"laden": 1, "ontladen": 2}.get(action, 0)
+        mode_idx = {"laden": 1, "ontladen": 2, "verkopen": 2}.get(action, 0)
         if self.ent_ms_mode.startswith("select."):
             st = self.hass.states.get(self.ent_ms_mode)
             options = (st.attributes.get("options") if st else None) or []
@@ -503,22 +640,53 @@ class WattsonCoordinator:
         self.last_applied = f"{action} ({power_w:.0f} W, marstek)"
 
     async def _num(self, entity, value):
-        if entity:
-            await self.hass.services.async_call(
-                "number", "set_value", {"entity_id": entity, "value": value}, blocking=True)
+        if not entity:
+            return
+        # clamp op het bereik van de number-entity: het apparaat bepaalt zijn
+        # eigen grenzen (bv. output_limit max 1400 W) en een waarde daarbuiten
+        # laat de hele service-call - en daarmee de tick - falen
+        st = self.hass.states.get(entity)
+        if st is not None:
+            try:
+                hi = st.attributes.get("max")
+                lo = st.attributes.get("min")
+                if hi is not None:
+                    value = min(float(value), float(hi))
+                if lo is not None:
+                    value = max(float(value), float(lo))
+            except (TypeError, ValueError):
+                pass
+        await self.hass.services.async_call(
+            "number", "set_value", {"entity_id": entity, "value": value}, blocking=True)
 
-    async def _restore_limits(self):
-        """Zet input/output-limieten terug op nominaal (wist een emergency-0)."""
-        await self._num(self.ent_zd_inlim, self.params.p_charge_max_w)
-        await self._num(self.ent_zd_outlim, self.params.p_discharge_max_w)
+    async def _enforce_rest(self) -> None:
+        """Rust afdwingen op apparaat-niveau als de accu aantoonbaar door blijft gaan.
+
+        De manager-select kan al 'off' tonen terwijl het apparaat nog laadt of
+        ontlaadt (commando kwam nooit aan, of iets anders zette het apparaat
+        aan). Meet VERSE activiteit -> beide limieten direct op 0; dat commando
+        gaat rechtstreeks naar het apparaat en is idempotent.
+        """
+        if self.adapter != ADAPTER_ZENDURE:
+            return
+        chg = self._fresh(self.ent_zd_chg)
+        dis = self._fresh(self.ent_zd_dis)
+        if (chg is not None and chg > 100) or (dis is not None and dis > 100):
+            _LOGGER.warning(
+                "Wattson: rust gecommandeerd maar accu is actief (laden %s W / ontladen %s W) — limieten naar 0",
+                "?" if chg is None else f"{chg:.0f}", "?" if dis is None else f"{dis:.0f}")
+            await self._num(self.ent_zd_inlim, 0)
+            await self._num(self.ent_zd_outlim, 0)
 
     async def _set_zendure(self, mode: str, manual_w: float) -> None:
-        # zonder tripped: zorg dat de apparaatlimieten open staan voor de gevraagde
-        # richting (anders blokkeert een eerdere emergency-0 de sturing stil)
-        if not self._tripped:
-            if mode in ("manual", "smart_charging", "store_solar"):
+        # zorg dat de apparaatlimieten open staan voor de gevraagde richting
+        # (een eerdere noodstop-0 blijft anders de sturing stil blokkeren);
+        # na een noodstop opent alleen de niet-getripte richting
+        if mode in ("manual", "smart_charging", "store_solar") and self._tripped != "laden":
+            if manual_w <= 0:  # manual laden of matching-laden
                 await self._num(self.ent_zd_inlim, self.params.p_charge_max_w)
-            if mode in ("smart_discharging", "manual", "smart"):
+        if mode in ("smart_discharging", "smart") or (mode == "manual" and manual_w > 0):
+            if self._tripped != "ontladen":
                 await self._num(self.ent_zd_outlim, self.params.p_discharge_max_w)
         cur = self.hass.states.get(self.ent_zd_operation)
         if mode == "manual":
@@ -544,7 +712,9 @@ class WattsonCoordinator:
 
     async def _assist_apply(self) -> None:
         await self._watchdog()
-        p1 = self._f(self.ent_p1)
+        if self._tripped:
+            return
+        p1 = self._fresh(self.ent_p1, 120)
         soc_pct = self._f(self.ent_soc)
         prijs = self._f(self.ent_price)
         if p1 is None or soc_pct is None or prijs is None:
@@ -586,8 +756,9 @@ class WattsonCoordinator:
 
     @callback
     def _ev_guard(self, _event) -> None:
-        """Auto begint te laden -> ontladen direct stoppen."""
-        if self.control_enabled and self._ev_charging() and (self.advies == "ontladen" or self.assist_active == "ontladen"):
+        """Auto begint te laden -> ontladen/verkopen direct stoppen."""
+        if self.control_enabled and self._ev_charging() and (
+                self.advies in ("ontladen", "verkopen") or self.assist_active == "ontladen"):
             self.assist_active = None
             self.hass.async_create_task(self._set_battery("rust", 0.0))
             self.advies = "rust (EV-guard)"
