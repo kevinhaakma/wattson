@@ -92,6 +92,28 @@ def p1_without_battery(p1_w: float, *, charge_w: float = 0.0,
     return p1_w - max(charge_w, 0.0) + max(discharge_w, 0.0)
 
 
+_EV_HOME_STATES = frozenset(("home", "on", "true", "thuis"))
+_EV_GATE_UNKNOWN = frozenset(("unknown", "unavailable", "none", ""))
+
+
+def ev_gate_allows(state: str | None) -> bool:
+    """Of een optionele EV-thuis-gate de laadmeting laat meetellen.
+
+    Geen/ongeldige telemetrie blijft bewust fail-safe: liever een EV-last
+    onnodig blokkeren dan een thuis ladende auto uit de accu voeden.
+    Alleen een expliciete niet-thuisstatus sluit de meting uit.
+    """
+    normalized = "" if state is None else str(state).strip().lower()
+    return normalized in _EV_GATE_UNKNOWN or normalized in _EV_HOME_STATES
+
+
+def setpoint_feedback_settled(command_w: float, measured_w: float | None,
+                              deadband_w: float) -> bool:
+    """True zodra het fysieke vermogen het vaste setpoint heeft bereikt."""
+    return (measured_w is not None
+            and abs(float(measured_w) - float(command_w)) <= deadband_w)
+
+
 async def set_number(hass, entity: str, value) -> None:
     """Zet een number-entity, geclampt op haar eigen min/max.
 
@@ -148,18 +170,21 @@ class AdapterCaps:
     surplus_mode      native PV-overschot-laadmodus (volgt P1 zelf)
     control_latency_s indicatie hoe snel een commando effect heeft
     min_setpoint_w    kleinste zinvolle setpoint van het apparaat
+    feedback_ack      wacht bij vaste setpoints op fysieke terugkoppeling
+                      voordat P1 opnieuw wordt gebruikt voor bijregelen
     """
 
     __slots__ = ("p1_matching", "device_limits", "surplus_mode",
-                 "control_latency_s", "min_setpoint_w")
+                 "control_latency_s", "min_setpoint_w", "feedback_ack")
 
     def __init__(self, *, p1_matching, device_limits, surplus_mode,
-                 control_latency_s, min_setpoint_w):
+                 control_latency_s, min_setpoint_w, feedback_ack=False):
         self.p1_matching = p1_matching
         self.device_limits = device_limits
         self.surplus_mode = surplus_mode
         self.control_latency_s = control_latency_s
         self.min_setpoint_w = min_setpoint_w
+        self.feedback_ack = feedback_ack
 
 
 class BatteryAdapter:
@@ -228,7 +253,8 @@ class ZendureAdapter(BatteryAdapter):
 
     name = "zendure"
     caps = AdapterCaps(p1_matching=False, device_limits=True, surplus_mode=True,
-                       control_latency_s=5.0, min_setpoint_w=50.0)
+                       control_latency_s=5.0, min_setpoint_w=50.0,
+                       feedback_ack=True)
 
     def telemetry_entities(self):
         return (self.c.ent_zd_chg, self.c.ent_zd_dis)

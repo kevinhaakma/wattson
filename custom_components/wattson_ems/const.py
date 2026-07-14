@@ -166,6 +166,9 @@ TRACK_FAST_THROTTLE_S = 2  # snelle lus: minimale tijd tussen twee ophogingen
 TRACK_DEADBAND_W = 40      # restimport onder deze band niet najagen; 40 W ligt
                            # onder Zendure's 50 W startstap, terwijl de 25 W
                            # export-guard een eventuele overshoot direct remt
+SETPOINT_ACK_DEADBAND_W = 25  # vast setpoint geldt als fysiek bereikt binnen
+                              # deze tolerantie; blokkeert asynchrone P1/accu-
+                              # combinaties tijdens Zendure-cloudlatentie
 TRACK_MARGE_W = 150        # limiet iets boven de vraag zodat matching kan ademen
 TRACK_LOWER_GRACE_S = 180  # terugnemen volgt de PIEK-vraag van de laatste 3 min:
                            # direct na matching leest P1 ~0 en de ontlaadmeting

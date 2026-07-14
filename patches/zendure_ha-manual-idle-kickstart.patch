@@ -1,0 +1,25 @@
+diff --git a/custom_components/zendure_ha/manager.py b/custom_components/zendure_ha/manager.py
+--- a/custom_components/zendure_ha/manager.py
++++ b/custom_components/zendure_ha/manager.py
+@@ -592,7 +592,20 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
+             await d.power_discharge(0 if max(0, d.pwr_offgrid) == 0 else 10)
+ 
+         # distribute discharging devices, use produced power first, before adding another device
+-        dev_start = max(0, setpoint - self.discharge_optimal * 2 - self.discharge_produced) if setpoint > SmartMode.POWER_START else 0
++        # LOKALE PATCH (Wattson, 2026-07-14): in MANUAL bleef een volledig
++        # stilstaand apparaat uit totdat het vaste setpoint boven 2x het
++        # optimale vermogen kwam (bij de Hyper 2000 circa 600 W). Daardoor
++        # werden normale huisvragen van 50--600 W wel als manual_power gezet,
++        # maar nooit fysiek gestart. Kick in manual één idle device vanaf de
++        # officiële POWER_START; zodra telemetrie homeOutput meldt, verdeelt de
++        # bestaande lus het exacte vaste setpoint.
++        if (self.operation == ManagerMode.MANUAL and not self.discharge
++                and setpoint >= SmartMode.POWER_START):
++            dev_start = 1
++        else:
++            dev_start = (max(0, setpoint - self.discharge_optimal * 2
++                             - self.discharge_produced)
++                         if setpoint > SmartMode.POWER_START else 0)
+         solaronly = self.discharge_produced >= setpoint
+         limit = self.discharge_produced if solaronly else self.discharge_limit
+         setpoint = min(limit, setpoint)

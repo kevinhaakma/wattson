@@ -98,6 +98,7 @@ from .const import (
     EV_THRESHOLD_KW,
     GEENDATA_STOP_S,
     PLAN_MIN_DWELL_S,
+    SETPOINT_ACK_DEADBAND_W,
     SOLAR_ASSIST_IMPORT_W,
     SOLAR_BUFFER_KWH,
     SOLAR_FORECAST_CONFIDENCE,
@@ -323,18 +324,11 @@ class WattsonCoordinator:
         value = self._f(self.ent_price)
         return None if value is None else self._price_eur_kwh(value, self._unit(self.ent_price))
 
-    # thuis-gate: alleen een expliciete 'elders'-status schakelt een wallbox-
-    # meting uit; geen gate, onbekend of unavailable telt als thuis (fail-safe)
-    _EV_HOME_STATES = ("home", "on", "true", "thuis")
-    _EV_GATE_UNKNOWN = ("unknown", "unavailable", "none", "")
-
     def _ev_at_home(self, gate: str) -> bool:
         if not gate:
             return True
         st = self.hass.states.get(gate)
-        if st is None or st.state.lower() in self._EV_GATE_UNKNOWN:
-            return True
-        return st.state.lower() in self._EV_HOME_STATES
+        return A.ev_gate_allows(None if st is None else st.state)
 
     def _wallbox_w(self, ent: str, gate: str, fresh_s: float | None = None) -> float:
         """EV-laadvermogen dat als THUIS-last telt. Voertuigtelemetrie
@@ -557,6 +551,11 @@ class WattsonCoordinator:
             return None
         if self._last_action != "ontladen":
             return None
+        if not self._discharge_command_settled():
+            # P1 en accutelemetrie lopen bij Zendure enkele cycli uiteen. Een
+            # nieuwe correctie vóór fysieke bevestiging combineert waarden van
+            # twee verschillende setpoints en veroorzaakt import/export-pingpong.
+            return None
         p1 = self._fresh_power_w(self.ent_p1, 90)
         if p1 is None:
             return None
@@ -564,6 +563,25 @@ class WattsonCoordinator:
         dis = self._fresh_power_w(ent_dis)
         dis_now = dis if dis is not None else self._last_discharge_w
         return max(A.p1_without_battery(p1, discharge_w=dis_now), 0.0)
+
+    def _discharge_feedback(self) -> float | None:
+        """Actueel fysiek ontlaadvermogen voor setpoint-bevestiging."""
+        if not self.caps.feedback_ack:
+            return self._last_discharge_w
+        _, ent_dis = self._bat_flow_entities()
+        # Geen freshness-eis: een lang stabiel vermogen verandert in HA niet
+        # altijd last_updated. Na een nieuw commando verschilt de oude waarde
+        # vanzelf van het doel totdat echte telemetrie de wijziging bevestigt.
+        return self._power_w(ent_dis)
+
+    def _discharge_command_settled(self) -> bool:
+        if not self.caps.feedback_ack:
+            return True
+        return A.setpoint_feedback_settled(
+            self._last_discharge_w,
+            self._discharge_feedback(),
+            SETPOINT_ACK_DEADBAND_W,
+        )
 
     @callback
     def _track_fast(self, _event) -> None:
@@ -1094,7 +1112,14 @@ class WattsonCoordinator:
         p1 = self._fresh_power_w(self.ent_p1, 60)
         if p1 is None or p1 >= 0:
             return  # geen export: niets te verlagen
-        allowed = max(self._last_discharge_w + p1, 0.0)
+        measured = self._discharge_feedback()
+        if (self.caps.feedback_ack and measured is not None
+                and not self._discharge_command_settled()):
+            return  # vorige correctie is nog onderweg; wacht op fysieke ack
+        # Bij ontbrekende feedback mag exportveiligheid nog steeds verlagen;
+        # verhogen blijft via _discharge_target geblokkeerd tot telemetrie er is.
+        current_dis = self._last_discharge_w if measured is None else measured
+        allowed = max(current_dis + p1, 0.0)
         if allowed < self._last_discharge_w - DIS_GUARD_DEADBAND_W:
             self._dis_guard_last = now
             self.hass.async_create_task(self._discharge_guard_apply(allowed))
