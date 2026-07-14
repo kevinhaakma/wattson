@@ -3,8 +3,8 @@
 Schaduwmodus (sturing uit) publiceert alleen het advies; met de master-switch
 aan wordt het eerste planuur uitgevoerd:
 - laden      -> operation 'manual' + manual_power = -W  (negatief = laden)
-- ontladen   -> operation 'smart_discharging' (P1-matching: nooit export,
-                nooit meer dan de huisvraag)
+- ontladen   -> operation 'manual' + manual_power = +W; Wattson volgt de P1
+                event-gedreven en remt direct terug bij export
 - verkopen   -> operation 'manual' + manual_power = +W  (vast vermogen,
                 exporteert boven de huisvraag; alleen boven de drempelprijs
                 en alleen met de verkoop-switch aan)
@@ -50,7 +50,9 @@ from .const import (
     ASSIST_EXPORT_W,
     ASSIST_IMPORT_W,
     ASSIST_MAX_SOC_MARGIN_KWH,
+    ASSIST_MIN_RUN_S,
     ASSIST_POWER_DEADBAND_W,
+    ASSIST_STOP_GRACE_S,
     ASSIST_SOC_MARGE_KWH,
     ASSIST_STOP_W,
     ASSIST_THROTTLE_S,
@@ -88,13 +90,20 @@ from .const import (
     DEFAULT_OPTIONS,
     DIS_GUARD_DEADBAND_W,
     DIS_GUARD_THROTTLE_S,
+    DWELL_OVERRIDE_EUR,
+    EV_HOUSE_MIN_W,
     EV_SUSPECT_JUMP_W,
     EV_THRESHOLD_KW,
     GEENDATA_STOP_S,
+    PLAN_MIN_DWELL_S,
+    SOLAR_ASSIST_IMPORT_W,
+    SOLAR_BUFFER_KWH,
+    SOLAR_FORECAST_CONFIDENCE,
     SWITCH_DEADBAND_EUR,
     TRACK_DEADBAND_W,
     TRACK_FAST_THROTTLE_S,
     TRACK_INTERVAL_S,
+    TRACK_LOWER_GRACE_S,
     TRACK_MARGE_W,
     UPDATE_MINUTES,
     WATCH_INTERVAL_S,
@@ -172,9 +181,15 @@ class WattsonCoordinator:
         self.assist_active: str | None = None
         self._tripped: str | None = None   # None | "laden" | "ontladen" (richting van de runaway)
         self.reserve_kwh = 0.0
+        self.solar_backed_kwh = 0.0
+        self._plan_dis_floor: float | None = None  # goedkoopste geplande ontlaaduurprijs
         self._cheap_future = 0.0
         self._max_future = 0.0
         self._assist_last = 0.0
+        self._assist_started = 0.0
+        self._assist_end_since: float | None = None
+        self._ev_house = False     # v1.9: bewust huisdeel-ontladen tijdens EV-sessie
+        self._last_mode_switch = 0.0
         self.aggressiveness = "gebalanceerd"
         self.advies = "init"
         self.setpoint_w = 0.0
@@ -197,6 +212,7 @@ class WattsonCoordinator:
         self._stop_grace_until = 0.0   # tot dit monotonic-moment is uitloop van
         self._stopped_richting: str | None = None  # ...deze richting geen runaway
         self._tracked_outlim = 0.0     # laatst door de volglus geschreven outputlimiet
+        self._vraag_hist: list[tuple[float, float]] = []  # (t, vraag) voor terugneem-grace
         self._track_fast_last = 0.0
         self._dis_guard_last = 0.0
         self._switch_debt = 0.0        # opgeteld gemist voordeel van gedempte modewissels
@@ -371,10 +387,11 @@ class WattsonCoordinator:
             tot = sum(weights)
             for dt, w in zip(day_hours, weights):
                 out[dt] = (budget * w / tot * 1000.0) if tot > 0 else 0.0
-        # het huidige uur weten we beter dan de bel
+        # het huidige uur weten we beter dan de bel; dit is een échte meting,
+        # dus de forecast-bias hoort hier niet overheen
         pv_now = self._power_w(self.ent_pv_now)
         if hours and pv_now is not None:
-            out[hours[0]] = pv_now * self.pv_bias
+            out[hours[0]] = pv_now
         return out
 
     # ---------- kern ----------
@@ -570,14 +587,24 @@ class WattsonCoordinator:
             vraag = self._discharge_target()
             if vraag is None:
                 return
+            # Terugnemen op de PIEK-vraag van de afgelopen TRACK_LOWER_GRACE_S:
+            # direct na matching leest P1 ~0 terwijl de ontlaadmeting (60s-poll)
+            # achterloopt, waardoor de kale momentvraag tussen ~0 en de echte
+            # huisvraag oscilleert. Elke limiet-write herstart het apparaat kort
+            # (~40 s idle), dus zonder dit geheugen cyclet het ontladen continu.
+            now_m = time.monotonic()
+            self._vraag_hist.append((now_m, vraag))
+            self._vraag_hist = [(t, v) for t, v in self._vraag_hist
+                                if now_m - t <= TRACK_LOWER_GRACE_S]
+            vraag_eff = max(v for _, v in self._vraag_hist)
             if self.caps.p1_matching:
-                doel = min(max(vraag + TRACK_MARGE_W, self.caps.min_setpoint_w),
+                doel = min(max(vraag_eff + TRACK_MARGE_W, self.caps.min_setpoint_w),
                            self.params.p_discharge_max_w)
                 if doel <= self._tracked_outlim - TRACK_DEADBAND_W:
                     await A.set_power_number(self.hass, self.ent_zd_outlim, doel)
                     self._tracked_outlim = doel
             else:
-                doel = min(vraag, self.params.p_discharge_max_w)
+                doel = min(vraag_eff, self.params.p_discharge_max_w)
                 if doel <= self._last_discharge_w - TRACK_DEADBAND_W:
                     await self._set_battery("ontladen", doel, p1_cap=False)
         elif act == "laden" and self.caps.surplus_mode:
@@ -670,6 +697,17 @@ class WattsonCoordinator:
         hours = [dt for dt, _ in prices]
         pv = self._pv_curve(hours)
         ev_now = self._ev_charging()
+        # v1.9: de harde EV-blokkade in de planner (hour_result: p=0) geldt
+        # alleen nog als de wallbox-telemetrie NIET vers is — dan kan load_w
+        # vervuild zijn met autovermogen en zou de net_home-cap de auto voeden.
+        # Met verse wallbox-meting is load_w betrouwbaar EV-gecorrigeerd en mag
+        # het plan het huisdeel bedienen (de apply-laag begrenst de
+        # output-limiet daarbovenop nogmaals op huislast).
+        wb_fresh_w = max(
+            self._fresh_power_w(self.ent_wallbox_1, 180) or 0.0,
+            self._fresh_power_w(self.ent_wallbox_2, 180) or 0.0,
+        )
+        ev_blind = ev_now and wb_fresh_w <= EV_THRESHOLD_KW * 1000.0
 
         steps = []
         p1_now = None
@@ -713,7 +751,7 @@ class WattsonCoordinator:
                 price_exp=max(price - self.wedge, -0.5),
                 load_w=load,
                 pv_w=pv.get(dt, 0.0),
-                ev_charging=ev_now if k == 0 else False,
+                ev_charging=ev_blind if k == 0 else False,
                 sell_ok=self._sell_ok(price),
             ))
 
@@ -738,10 +776,43 @@ class WattsonCoordinator:
         prices_only = [s2.price_imp for s2 in steps]
         self._cheap_future = min(prices_only)
         self._max_future = max(prices_only)
-        # reserve: wat het plan later nog wil ontladen (accu-zijde kWh);
-        # bijspringen mag alleen boven deze reserve
-        eta = P.eta_oneway(self.params.p_discharge_max_w, self.params) or 1.0
-        self.reserve_kwh = sum(-sp for sp in setpoints[1:] if sp < 0) / 1000.0 / eta
+        # Reserveer alleen het grootste cumulatieve tekort van het toekomstige
+        # plan. Toekomstig laden mag een latere ontlading dus aanvullen; dezelfde
+        # kWh wordt niet langer voor ieder ontlaaduur opnieuw gereserveerd.
+        _, soc_after_now, _, _ = P.hour_result(steps[0], setpoints[0], soc, self.params)
+        self.reserve_kwh = min(
+            P.future_reserve_kwh(steps[1:], setpoints[1:], soc_after_now, self.params),
+            max(soc - self.params.soc_min_kwh, 0.0),
+        )
+
+        # Kijk alleen naar de resterende volledige uren van vandaag. Van de
+        # PV-prognose telt 75%; daarna gaan huislast, vrije accuruimte en een
+        # onzekerheidsbuffer eraf. Alleen productie die anders waarschijnlijk
+        # niet in de accu past, mag actuele netimport alvast verdringen.
+        today = dt_util.as_local(prices[0][0]).date()
+        solar_steps = [
+            st for (dt, _), st in zip(prices[1:], steps[1:])
+            if dt_util.as_local(dt).date() == today and st.pv_w > 0.0
+        ]
+        self.solar_backed_kwh = P.solar_backed_budget_kwh(
+            solar_steps,
+            soc,
+            self.params,
+            confidence=SOLAR_FORECAST_CONFIDENCE,
+            buffer_kwh=SOLAR_BUFFER_KWH,
+            soc_margin_kwh=ASSIST_SOC_MARGE_KWH,
+        )
+        self.inputs.update({
+            "planreserve_kwh": round(self.reserve_kwh, 2),
+            "zon_gedekt_beschikbaar_kwh": round(self.solar_backed_kwh, 2),
+            "zon_prognose_zekerheid_pct": round(SOLAR_FORECAST_CONFIDENCE * 100),
+        })
+        # goedkoopste uur waarin het plan nog wil ontladen: een piek NU met een
+        # prijs daarboven mag de assist "voordringend" bedienen (frontrun) —
+        # dezelfde energie, alleen eerder en waardevoller; de replan verdeelt
+        # de rest daarna opnieuw
+        dis_prices = [s2.price_imp for s2, sp2 in zip(steps[1:], setpoints[1:]) if sp2 < 0]
+        self._plan_dis_floor = min(dis_prices) if dis_prices else None
         # verwacht planvoordeel: kosten van niets-doen minus plan-kosten, over
         # dezelfde horizon en symmetrisch verrekend — beide paden starten op de
         # actuele SoC en krijgen dezelfde eindwaarde voor restlading (plan()
@@ -806,15 +877,40 @@ class WattsonCoordinator:
             c0, soc1, _, _ = P.hour_result(steps[0], forced, soc, self.params)
             _, rest = P.plan(steps[1:], soc1, self.params, terminal_value=tv)
             voordeel = max((c0 + rest) - cost, 0.0)
-            self._switch_debt += voordeel
-            if self._switch_debt < SWITCH_DEADBAND_EUR:
+            # Een oude laad/ontlaadstand die door SoC-, PV- of lastgrenzen
+            # fysiek niets meer kan doen, mag nooit door de euro-demping blijven
+            # hangen. Rust (of de nieuwe uitvoerbare richting) volgt direct.
+            stale_active_mode = (
+                prev_advies != "rust"
+                and not P.action_is_effective(steps[0], forced, soc, self.params)
+            )
+            if stale_active_mode:
+                self._switch_debt = 0.0
+                self._last_mode_switch = time.monotonic()
+            else:
+                self._switch_debt += voordeel
+            dwelling = time.monotonic() - self._last_mode_switch < PLAN_MIN_DWELL_S
+            if stale_active_mode:
+                pass
+            elif self._switch_debt < SWITCH_DEADBAND_EUR:
                 self.reden = (f"houdt {prev_advies} vast — wissel naar {self.advies} "
                               f"levert cumulatief €{self._switch_debt:.3f} op "
                               f"(drempel €{SWITCH_DEADBAND_EUR:.2f})")
                 self.advies = prev_advies
                 self.setpoint_w = 0.0 if prev_advies == "rust" else prev_setpoint
+            elif dwelling and voordeel < DWELL_OVERRIDE_EUR:
+                # vlakke prijzen laten de DP elke tick van gedachten wisselen;
+                # net gewisseld + klein voordeel per tick = relais met rust
+                # laten. Een echte piek (voordeel >= override) gaat wél door.
+                self.reden = (f"houdt {prev_advies} vast — wisselde "
+                              f"<{PLAN_MIN_DWELL_S // 60} min geleden en "
+                              f"€{voordeel:.3f}/tick blijft onder de "
+                              f"override €{DWELL_OVERRIDE_EUR:.2f}")
+                self.advies = prev_advies
+                self.setpoint_w = 0.0 if prev_advies == "rust" else prev_setpoint
             else:
                 self._switch_debt = 0.0
+                self._last_mode_switch = time.monotonic()
         else:
             self._switch_debt = 0.0
 
@@ -839,6 +935,7 @@ class WattsonCoordinator:
                 # de eigen AI-modus is nog de baas: niet dubbel sturen
                 self.last_applied = "geblokkeerd: accu-AI (HEMS) staat nog aan"
                 return
+        self._ev_house = False
         if self.advies == "laden":
             self.assist_active = None
             # is er nú meer PV-overschot dan het geplande laadvermogen, gebruik
@@ -857,6 +954,31 @@ class WattsonCoordinator:
         elif self.advies == "ontladen" and not ev_now:
             self.assist_active = None
             await self._set_battery("ontladen", abs(self.setpoint_w))
+        elif self.advies == "ontladen" and ev_now:
+            # v1.9: EV laadt — de accu dekt alléén het huisdeel. De wallbox
+            # meet zijn eigen vermogen, dus de EV-gecorrigeerde huislast
+            # (steps[0].load_w) is betrouwbaar. Een vast manual-setpoint op
+            # die huislast levert precies dat deel zonder de auto mee te
+            # voeden. Voorwaarde: verse wallbox-telemetrie — anders het oude
+            # veilige gedrag (rust).
+            self.assist_active = None
+            wb_fresh = ((self._fresh_power_w(self.ent_wallbox_1, 180) or 0.0)
+                        + (self._fresh_power_w(self.ent_wallbox_2, 180) or 0.0))
+            huis_w = min(max(steps[0].load_w, 0.0), self.params.p_discharge_max_w)
+            if wb_fresh > EV_THRESHOLD_KW * 1000.0 and huis_w >= EV_HOUSE_MIN_W:
+                # BEWUST het "verkopen"-pad: dat omzeilt de normale P1-cap,
+                # zodat exact de EV-gecorrigeerde huislast als vast vermogen
+                # wordt gezet. Hertaxatie volgt iedere plantick.
+                await self._set_battery("verkopen", huis_w)
+                self._ev_house = True
+                self.setpoint_w = -round(huis_w)
+                self.reden = f"EV laadt — accu dekt alleen het huisdeel ({huis_w:.0f} W, vast)"
+            else:
+                await self._set_battery("rust", 0.0)
+                self.setpoint_w = 0.0
+                self.reden = ("EV laadt — wallbox-telemetrie niet vers, accu rust"
+                              if wb_fresh <= EV_THRESHOLD_KW * 1000.0
+                              else f"EV laadt — huislast te klein ({huis_w:.0f} W), accu rust")
         elif self.assist_active:
             # Het uurplan adviseert rust, maar de realtime-laag loopt nog. Houd
             # advies/setpoint daarmee in lijn: anders kan de volgende watchdog
@@ -977,17 +1099,60 @@ class WattsonCoordinator:
             return
         soc = soc_pct / 100.0 * self.params.capacity_kwh
         vrij = soc - self.params.soc_min_kwh - self.reserve_kwh - ASSIST_SOC_MARGE_KWH
+        physical_free = soc - self.params.soc_min_kwh - ASSIST_SOC_MARGE_KWH
+        # frontrun: is de prijs nú minstens zo hoog als het goedkoopste uur
+        # waarin het plan deze energie later toch al wil ontladen, dan is een
+        # piek nu bedienen strikt beter — de planreserve telt dan niet als
+        # blokkade en de economie-check (herladen tegen netprijs) evenmin
+        floor = self._plan_dis_floor
+        frontrun = floor is not None and prijs >= floor - 0.005
+        vrij_dis = physical_free if frontrun else vrij
         eta_rt = P.eta_oneway(800.0, self.params) ** 2
         prev = (self.advies, self.last_applied)
         source_p1 = self._assist_source_p1(p1)
+        import_need = source_p1 if source_p1 is not None else p1
+        solar_allowed = self.solar_backed_kwh > 0.01 and (
+            self.assist_active == "ontladen" or import_need > SOLAR_ASSIST_IMPORT_W)
+        if solar_allowed:
+            # Maximaal het zon-gedekte budget boven op de gewone planreserve.
+            # Iedere plantick herberekent dit met de dan actuele SoC; naarmate
+            # de accu leger wordt, groeit de ruimte en krimpt dit budget mee.
+            vrij_dis = max(
+                vrij_dis,
+                min(max(physical_free, 0.0), self.solar_backed_kwh),
+            )
 
         peak_ended = source_p1 is not None and source_p1 < ASSIST_STOP_W
         surplus_ended = source_p1 is not None and source_p1 > -ASSIST_STOP_W
+        # Opwarmvenster: direct na de start regelt native matching P1 al naar
+        # ~0 terwijl het gemeten accuvermogen nog een verse "0" van vóór de
+        # start leest (60s-poll, write-on-change). source_p1 rekent het
+        # accuvermogen dan niet terug en "voorbij" is vals — geen stopbewijs.
+        # Harde stops (SoC vol, reserve, EV, prijsconditie) blijven gelden.
+        if self.assist_active and time.monotonic() - self._assist_started < ASSIST_MIN_RUN_S:
+            peak_ended = surplus_ended = False
+        # Stop-dwell: "voorbij" moet ASSIST_STOP_GRACE_S aanhouden voordat we
+        # echt stoppen. Wolk-dips en apparaat-eigen pauzes rond de drempel
+        # cyclen anders het relais (~4-5 min aan / 25 s uit); in de grace
+        # moduleert native matching zelf mee, dus dit kost geen netstroom.
+        ended_now = peak_ended if self.assist_active == "ontladen" else surplus_ended
+        if self.assist_active:
+            if ended_now:
+                if self._assist_end_since is None:
+                    self._assist_end_since = time.monotonic()
+            else:
+                self._assist_end_since = None
+            held = (self._assist_end_since is not None
+                    and time.monotonic() - self._assist_end_since >= ASSIST_STOP_GRACE_S)
+            peak_ended = held if self.assist_active == "ontladen" else False
+            surplus_ended = held if self.assist_active == "laden" else False
         charge_full = soc >= self.params.soc_max_kwh - ASSIST_MAX_SOC_MARGIN_KWH
         discharge_economic = prijs > self._cheap_future / max(eta_rt, 0.5)
         charge_economic = self._max_future * eta_rt > prijs
+        discharge_allowed = discharge_economic or frontrun or solar_allowed
         if self.assist_active == "ontladen" and (
-                peak_ended or vrij <= 0 or self._ev_charging() or not discharge_economic):
+                peak_ended or vrij_dis <= 0 or self._ev_charging()
+                or not discharge_allowed):
             self.assist_active = None
             await self._set_battery("rust", 0.0)
             self.advies = "rust"
@@ -1022,16 +1187,28 @@ class WattsonCoordinator:
             await self._set_battery("laden", target)
             self.setpoint_w = round(self._last_charge_w)
             self.reden = f"zonoverschot volgt bronexport {-source_p1:.0f} W"
-        elif (p1 > ASSIST_IMPORT_W and not self._ev_charging() and vrij > 0
-              and discharge_economic):
+        elif (((p1 > ASSIST_IMPORT_W and (discharge_economic or frontrun))
+               or (p1 > SOLAR_ASSIST_IMPORT_W and solar_allowed))
+              and not self._ev_charging() and vrij_dis > 0):
             self.assist_active = "ontladen"
+            self._assist_started = time.monotonic()
+            self._assist_end_since = None
             await self._set_battery("ontladen", min(p1, self.params.p_discharge_max_w))
             self.advies = "bijspringen: ontladen"
             self.setpoint_w = -round(self._last_discharge_w)
-            self.reden = f"piek {p1:.0f} W, prijs €{prijs:.3f} > herlaadprijs"
+            if p1 > SOLAR_ASSIST_IMPORT_W and solar_allowed:
+                self.reden = (f"netimport {p1:.0f} W zon-gedekt; "
+                              f"{self.solar_backed_kwh:.2f} kWh verwacht hervulbaar")
+            elif discharge_economic:
+                self.reden = f"piek {p1:.0f} W, prijs €{prijs:.3f} > herlaadprijs"
+            else:
+                self.reden = (f"piek {p1:.0f} W, prijs €{prijs:.3f} >= "
+                              f"plan-ontlaadvloer €{floor:.3f} (frontrun)")
         elif (p1 < -ASSIST_EXPORT_W and soc < self.params.soc_max_kwh - 0.2
               and charge_economic):
             self.assist_active = "laden"
+            self._assist_started = time.monotonic()
+            self._assist_end_since = None
             await self._set_battery("laden_overschot", min(-p1, self.params.p_charge_max_w))
             self.advies = "bijspringen: laden"
             self.setpoint_w = round(self._last_charge_w)
@@ -1044,7 +1221,14 @@ class WattsonCoordinator:
 
     @callback
     def _ev_guard(self, _event) -> None:
-        """Auto begint te laden -> ontladen/verkopen direct stoppen."""
+        """Auto begint te laden -> ontladen/verkopen direct stoppen.
+
+        Uitzondering (v1.9): bewust huisdeel-ontladen tijdens een EV-sessie
+        (_ev_house) is door de plantick zelf gezet en mag blijven staan —
+        de output-limiet staat dan op huislast, niet op vol vermogen.
+        """
+        if self._ev_house:
+            return
         if self.control_enabled and self._ev_charging() and (
                 self.advies in ("ontladen", "verkopen") or self.assist_active == "ontladen"):
             prev = (self.advies, self.last_applied)

@@ -76,6 +76,9 @@ class FakeCoordinator:
     def _fresh_power_w(self, entity, max_age_s=180):
         return A.read_fresh_power_w(self.hass, entity, max_age_s, NOW)
 
+    def _power_w(self, entity):
+        return A.read_power_w(self.hass, entity)
+
 
 RESULTS = []
 
@@ -95,6 +98,15 @@ def last_value(hass, entity):
     return matching[-1][2].get("value") if matching else None
 
 
+def effective_value(hass, entity):
+    """Laatste write, of de al geldige entity-waarde als schrijven niet nodig was."""
+    written = last_value(hass, entity)
+    if written is not None:
+        return written
+    state = hass.states.get(entity)
+    return float(state.state) if state is not None else None
+
+
 def run(coro):
     return asyncio.run(coro)
 
@@ -109,6 +121,7 @@ def zendure_hass():
         "number.zd_manual": FakeState("0", {"min": -2400, "max": 2400, "unit_of_measurement": "W"}),
         "number.zd_in": FakeState("0", {"min": 0, "max": 2400, "unit_of_measurement": "W"}),
         "number.zd_out": FakeState("0", {"min": 0, "max": 1400, "unit_of_measurement": "W"}),
+        "sensor.p1": FakeState("600", {"unit_of_measurement": "W"}),
         "sensor.zd_chg": FakeState("0", {"unit_of_measurement": "W"}),
         "sensor.zd_dis": FakeState("0", {"unit_of_measurement": "W"}),
     })
@@ -116,7 +129,8 @@ def zendure_hass():
 
 def make_zendure(hass):
     c = FakeCoordinator(
-        hass, ent_zd_operation="select.zd_op", ent_zd_manual="number.zd_manual",
+        hass, ent_p1="sensor.p1", ent_zd_operation="select.zd_op",
+        ent_zd_manual="number.zd_manual",
         ent_zd_inlim="number.zd_in", ent_zd_outlim="number.zd_out",
         ent_zd_chg="sensor.zd_chg", ent_zd_dis="sensor.zd_dis")
     return c, A.create_adapter("zendure", c)
@@ -128,24 +142,30 @@ def test_zendure():
     c, ad = make_zendure(hass)
     run(ad.apply("laden", 800.0))
     check("zendure: laden -> manual -800 W", last_value(hass, "number.zd_manual") == -800.0)
-    check("zendure: laden opent input-limiet", last_value(hass, "number.zd_in") == 1600.0)
+    check("zendure: manual laden schrijft inputLimit niet rechtstreeks",
+          not calls_for(hass, "number.zd_in"))
     sel = [d for d in hass.services.calls if d[1] == "select_option"]
     check("zendure: operation -> manual", sel and sel[-1][2]["option"] == "manual")
 
-    # ontladen: P1-matching, output-limiet begrensd op setpoint
+    # ontladen: Wattson is de enige P1-regelaar. De Zendure-manager krijgt een
+    # vast manual-setpoint en mag als enige de fysieke outputLimit schrijven.
     hass = zendure_hass()
     c, ad = make_zendure(hass)
-    run(ad.apply("ontladen", 600.0))
-    check("zendure: ontladen -> smart_discharging",
-          any(d[2].get("option") == "smart_discharging" for d in hass.services.calls if d[1] == "select_option"))
-    check("zendure: output-limiet = gepland setpoint", last_value(hass, "number.zd_out") == 600.0)
+    applied = run(ad.apply("ontladen", 800.0))
+    check("zendure: ontladen -> manual +600 W, gecapt op P1",
+          applied == 600.0 and last_value(hass, "number.zd_manual") == 600.0
+          and any(d[2].get("option") == "manual"
+                  for d in hass.services.calls if d[1] == "select_option"))
+    check("zendure: normaal ontladen schrijft outputLimit niet rechtstreeks",
+          not calls_for(hass, "number.zd_out"))
 
-    # klein setpoint krijgt de min_setpoint-vloer
+    # Een klein vast setpoint mag niet omhoog worden afgerond: dat zou export
+    # veroorzaken. De manager/apparaatdrempel bepaalt of 40 W uitvoerbaar is.
     hass = zendure_hass()
     c, ad = make_zendure(hass)
-    run(ad.apply("ontladen", 40.0))
-    check("zendure: output-limiet minimaal min_setpoint",
-          last_value(hass, "number.zd_out") == ad.caps.min_setpoint_w)
+    applied = run(ad.apply("ontladen", 40.0))
+    check("zendure: klein ontlaadsetpoint wordt niet omhoog afgerond",
+          applied == 40.0 and last_value(hass, "number.zd_manual") == 40.0)
 
     # verkopen: manual met positief vermogen, gemaximeerd op p_discharge_max
     hass = zendure_hass()
@@ -158,7 +178,8 @@ def test_zendure():
     # rust laat 'm staan; niet geconfigureerd -> geen calls
     def make_zendure_ac(hass):
         c = FakeCoordinator(
-            hass, ent_zd_operation="select.zd_op", ent_zd_manual="number.zd_manual",
+            hass, ent_p1="sensor.p1", ent_zd_operation="select.zd_op",
+            ent_zd_manual="number.zd_manual",
             ent_zd_inlim="number.zd_in", ent_zd_outlim="number.zd_out",
             ent_zd_chg="sensor.zd_chg", ent_zd_dis="sensor.zd_dis")
         c.ent_zd_acmode = "select.zd_acmode"
@@ -206,7 +227,7 @@ def test_zendure():
     sel = [d for d in hass.services.calls if d[1] == "select_option"]
     check("zendure: rust -> operation off + output-limiet 0 (geen sluiplek)",
           applied == 0.0 and sel and sel[-1][2]["option"] == "off"
-          and last_value(hass, "number.zd_out") == 0.0
+          and effective_value(hass, "number.zd_out") == 0.0
           and last_value(hass, "number.zd_in") is None)
 
     # rust na ontladen: limiet gaat weer open bij de volgende ontlaad-actie
@@ -214,28 +235,32 @@ def test_zendure():
     c, ad = make_zendure(hass)
     run(ad.apply("rust", 0.0))
     run(ad.apply("ontladen", 500.0))
-    check("zendure: ontladen na rust heropent output-limiet",
-          last_value(hass, "number.zd_out") == 500.0)
+    check("zendure: ontladen na rust start via manual zonder limiet-pingpong",
+          last_value(hass, "number.zd_manual") == 500.0
+          and effective_value(hass, "number.zd_out") == 0.0
+          and not any(call[2]["value"] > 0 for call in calls_for(hass, "number.zd_out")))
 
     # noodstop: alleen de foute richting dicht
     hass = zendure_hass()
     c, ad = make_zendure(hass)
     run(ad.emergency_stop("ontladen"))
     check("zendure: noodstop ontladen -> outlim 0, inlim ongemoeid",
-          last_value(hass, "number.zd_out") == 0.0 and last_value(hass, "number.zd_in") is None)
+          effective_value(hass, "number.zd_out") == 0.0 and last_value(hass, "number.zd_in") is None)
     run(ad.emergency_stop(None))
     check("zendure: noodstop onbekende richting -> beide limieten 0",
-          last_value(hass, "number.zd_in") == 0.0)
+          effective_value(hass, "number.zd_in") == 0.0)
 
     # na een trip: geopende richting blijft dicht
     hass = zendure_hass()
     c, ad = make_zendure(hass)
     c._tripped = "ontladen"
     run(ad.apply("ontladen", 600.0))
-    check("zendure: getripte richting wordt niet heropend",
-          last_value(hass, "number.zd_out") is None)
+    check("zendure: getripte richting krijgt geen managercommando",
+          last_value(hass, "number.zd_manual") is None
+          and not any(d[1] == "select_option" for d in hass.services.calls))
     run(ad.apply("laden", 400.0))
-    check("zendure: niet-getripte richting werkt wel", last_value(hass, "number.zd_in") == 1600.0)
+    check("zendure: niet-getripte richting werkt wel",
+          last_value(hass, "number.zd_manual") == -400.0)
 
     # enforce_rest: verse activiteit -> beide limieten 0
     hass = zendure_hass()
@@ -243,7 +268,8 @@ def test_zendure():
     c, ad = make_zendure(hass)
     run(ad.enforce_rest())
     check("zendure: enforce_rest bij verse activiteit -> limieten 0",
-          last_value(hass, "number.zd_in") == 0.0 and last_value(hass, "number.zd_out") == 0.0)
+          effective_value(hass, "number.zd_in") == 0.0
+          and effective_value(hass, "number.zd_out") == 0.0)
 
     # enforce_rest: bevroren telemetrie is geen bewijs
     hass = zendure_hass()
@@ -260,11 +286,10 @@ def test_zendure():
     run(ad.apply("laden", 800.0))
     check("zendure: kW-number krijgt kW-waarde", last_value(hass, "number.zd_manual") == -0.8)
 
-    # number-clamp: waarde boven max wordt geclampt (out max 1400 < 1600)
+    # number-clamp blijft voor noodstops en expliciete device-limietwrites
     hass = zendure_hass()
     hass._states["number.zd_out"] = FakeState("0", {"min": 0, "max": 700, "unit_of_measurement": "W"})
-    c, ad = make_zendure(hass)
-    run(ad.apply("ontladen", 800.0))
+    run(A.set_power_number(hass, "number.zd_out", 800.0))
     check("zendure: limiet geclampt op entity-max", last_value(hass, "number.zd_out") == 700.0)
 
 
@@ -336,7 +361,8 @@ def test_generic():
     # signed number: ontladen bij export (P1 negatief) -> 0
     hass, c, ad = make(ent_gen_power="number.gp")
     applied = run(ad.apply("ontladen", 800.0))
-    check("generic: ontladen bij export -> 0 W", applied == 0.0 and last_value(hass, "number.gp") == 0.0)
+    check("generic: ontladen bij export -> 0 W",
+          applied == 0.0 and effective_value(hass, "number.gp") == 0.0)
 
     # p1_cap=False (discharge-guard-pad): geen momentane cap
     hass, c, ad = make(ent_gen_power="number.gp")
@@ -377,7 +403,8 @@ def test_generic():
     hass, c, ad = make(ent_gen_charge="number.gc", ent_gen_discharge="number.gd")
     run(ad.apply("laden", 900.0))
     check("generic: losse numbers -> laden 900, ontladen 0",
-          last_value(hass, "number.gc") == 900.0 and last_value(hass, "number.gd") == 0.0)
+          last_value(hass, "number.gc") == 900.0
+          and effective_value(hass, "number.gd") == 0.0)
 
     # verkopen: max ontlaadvermogen, geen P1-cap
     hass, c, ad = make(ent_gen_power="number.gp")
@@ -388,7 +415,7 @@ def test_generic():
     # rust: signed number naar 0
     hass, c, ad = make(ent_gen_power="number.gp")
     run(ad.apply("rust", 0.0))
-    check("generic: rust -> 0 W", last_value(hass, "number.gp") == 0.0)
+    check("generic: rust -> 0 W", effective_value(hass, "number.gp") == 0.0)
 
 
 def test_telemetry_and_caps():
@@ -412,8 +439,8 @@ def test_telemetry_and_caps():
     z = A.create_adapter("zendure", FakeCoordinator(FakeHass({})))
     m = A.create_adapter("marstek", FakeCoordinator(FakeHass({})))
     g = A.create_adapter("generic", FakeCoordinator(FakeHass({})))
-    check("caps: alleen zendure heeft p1_matching/device_limits/surplus",
-          z.caps.p1_matching and z.caps.device_limits and z.caps.surplus_mode
+    check("caps: zendure gebruikt Wattson P1-guard + device-limieten/surplus",
+          not z.caps.p1_matching and z.caps.device_limits and z.caps.surplus_mode
           and not (m.caps.p1_matching or m.caps.device_limits or m.caps.surplus_mode)
           and not (g.caps.p1_matching or g.caps.device_limits or g.caps.surplus_mode))
     check("caps: onbekend merk valt terug op generic",

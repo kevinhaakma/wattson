@@ -97,15 +97,35 @@ DEFAULT_OPTIONS = {
 }
 
 EV_THRESHOLD_KW = 0.5      # daarboven telt als "auto laadt"
+EV_HOUSE_MIN_W = 100       # huisdeel-ontladen tijdens EV pas vanaf deze last
 
 # dynamisch bijspringen (realtime laag bovenop het uurplan)
 ASSIST_IMPORT_W = 400      # huis-import waarboven piek-assist mag starten
+SOLAR_ASSIST_IMPORT_W = 50   # bij aantoonbaar hervulbare energie ook kleine
+                             # netimport vanaf de uitvoerbare Zendure-startstap
 ASSIST_EXPORT_W = 300      # export waarboven overschot-assist mag starten
-ASSIST_STOP_W = 150        # hysterese: daaronder stopt de assist
-ASSIST_THROTTLE_S = 30     # minimale tijd tussen assist-beslissingen
+ASSIST_STOP_W = 40         # pas stoppen als bronvraag/overschot vrijwel nul is;
+                           # moet onder SOLAR_ASSIST_IMPORT_W blijven
+ASSIST_THROTTLE_S = 15     # minimale tijd tussen assist-beslissingen (P1 komt
+                           # elke ~10 s binnen; 15 s is de natuurlijke vloer)
 ASSIST_SOC_MARGE_KWH = 0.15
 ASSIST_MAX_SOC_MARGIN_KWH = 0.05  # laad-assist stopt voor de absolute bovengrens
 ASSIST_POWER_DEADBAND_W = 50      # voorkom setpoint-calls voor meetruis
+ASSIST_STOP_GRACE_S = 150  # "piek/overschot voorbij" moet zo lang aanhouden
+                           # voordat de assist echt stopt: vangt wolk-dips en
+                           # stale telemetrie af zonder relais-gecycle; native
+                           # matching moduleert in de tussentijd zelf al mee
+ASSIST_MIN_RUN_S = 180     # opwarmtijd na assist-start: de accutelemetrie
+                           # (60s-poll, write-on-change) loopt achter op het
+                           # apparaat, dus "piek/overschot voorbij" is in dit
+                           # venster geen geldig stopbewijs (harde stops zoals
+                           # SoC-vol, EV en reserve blijven wél direct gelden)
+# Zon-gedekte ontlading gebruikt alleen het conservatieve deel van de
+# resterende dagprognose. Pas als die productie na de verwachte huislast,
+# vrije accuruimte en deze buffer nog energie overlaat, mag Wattson diezelfde
+# energie alvast inzetten om actuele netimport te voorkomen.
+SOLAR_FORECAST_CONFIDENCE = 0.75
+SOLAR_BUFFER_KWH = 0.75
 UPDATE_MINUTES = 10        # her-plan interval; realtime werk (bijspringen,
                            # EV-guard, discharge-guard) is event-gedreven en
                            # de veiligheid draait apart op WATCH_INTERVAL_S
@@ -132,8 +152,14 @@ WATCH_STOP_GRACE_S = 45
 #   en op vaste adapters remt de discharge-guard direct bij export).
 TRACK_INTERVAL_S = 30      # trage lus: terugnemen + surplus-promotie
 TRACK_FAST_THROTTLE_S = 2  # snelle lus: minimale tijd tussen twee ophogingen
-TRACK_DEADBAND_W = 100     # pas schrijven als het doel zoveel afwijkt
+TRACK_DEADBAND_W = 40      # restimport onder deze band niet najagen; 40 W ligt
+                           # onder Zendure's 50 W startstap, terwijl de 25 W
+                           # export-guard een eventuele overshoot direct remt
 TRACK_MARGE_W = 150        # limiet iets boven de vraag zodat matching kan ademen
+TRACK_LOWER_GRACE_S = 180  # terugnemen volgt de PIEK-vraag van de laatste 3 min:
+                           # direct na matching leest P1 ~0 en de ontlaadmeting
+                           # loopt achter, waardoor de kale momentvraag oscilleert
+                           # en elke limiet-write het apparaat kort herstart
 
 # discharge-guard (marstek/generic): het ontlaad-setpoint is daar een vast
 # vermogen; zakt de huisvraag, dan verlaagt deze altijd-actieve bewaking het
@@ -146,6 +172,11 @@ DIS_GUARD_DEADBAND_W = 25
 # pendelen rond break-even-prijzen zonder echte marge weg te geven: het
 # gemiste voordeel telt per tick op en de wissel volgt zodra die loont.
 SWITCH_DEADBAND_EUR = 0.02
+PLAN_MIN_DWELL_S = 900     # na een modewissel: kleine voordelen wachten deze
+                           # tijd uit, zodat vlakke (nacht)prijzen het relais
+                           # niet elke tick laten schakelen
+DWELL_OVERRIDE_EUR = 0.05  # een wissel die per tick zoveel oplevert (echte
+                           # piek / duur uur) gaat wél direct door de dwell heen
 
 # verdachte lastsprong: springt de huisvraag in één tick zoveel omhoog zonder
 # dat een wallbox het bevestigt, dan kan het een EV-start zijn waarvan de

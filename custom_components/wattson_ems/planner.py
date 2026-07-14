@@ -117,6 +117,46 @@ def hour_result(step, action_w, soc_kwh, params):
     return cost, soc, action, thru
 
 
+def future_reserve_kwh(steps, setpoints, soc0_kwh, params):
+    """Minimale startenergie die een toekomstig actiepad werkelijk nodig heeft.
+
+    Alleen het grootste cumulatieve energietekort telt als reserve. Toekomstig
+    laden vult een latere ontlading dus eerst aan; alle ontlaaduren simpelweg
+    optellen zou dezelfde kWh meermaals reserveren en realtime gebruik blokkeren.
+    """
+    soc = min(max(soc0_kwh, params.soc_min_kwh), params.soc_max_kwh)
+    cumulative = 0.0
+    lowest = 0.0
+    for step, action in zip(steps, setpoints):
+        _, soc_next, _, _ = hour_result(step, action, soc, params)
+        cumulative += soc_next - soc
+        lowest = min(lowest, cumulative)
+        soc = soc_next
+    return max(-lowest, 0.0)
+
+
+def conservative_solar_surplus_kwh(steps, confidence=0.75):
+    """Conservatieve netto PV-energie na de verwachte huislast."""
+    net = sum((step.pv_w * confidence - step.load_w) / 1000.0 for step in steps)
+    return max(net, 0.0)
+
+
+def solar_backed_budget_kwh(
+        steps, soc_kwh, params, confidence=0.75, buffer_kwh=0.75,
+        soc_margin_kwh=0.15):
+    """Energie die nu mag worden gebruikt en later conservatief door PV hervult."""
+    surplus = conservative_solar_surplus_kwh(steps, confidence)
+    room = max(params.soc_max_kwh - soc_kwh, 0.0)
+    available = max(soc_kwh - params.soc_min_kwh - soc_margin_kwh, 0.0)
+    return min(max(surplus - room - buffer_kwh, 0.0), available)
+
+
+def action_is_effective(step, action_w, soc_kwh, params, minimum_w=50.0):
+    """Of een vastgehouden planactie fysiek nog uitvoerbaar is."""
+    _, _, actual_w, _ = hour_result(step, action_w, soc_kwh, params)
+    return abs(actual_w) >= minimum_w
+
+
 def plan(steps, soc0_kwh, params, terminal_value=0.0):
     """Backward-induction DP.
 

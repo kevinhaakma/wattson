@@ -7,7 +7,7 @@
 **Explainable smart home battery control for Home Assistant**
 
 [![HACS Custom](https://img.shields.io/badge/HACS-Custom-1565C0.svg?style=for-the-badge)](https://github.com/hacs/integration)
-[![Version](https://img.shields.io/badge/version-1.6.0-00B4B0.svg?style=for-the-badge)](#)
+[![Version](https://img.shields.io/badge/version-1.6.1-00B4B0.svg?style=for-the-badge)](#)
 [![License](https://img.shields.io/badge/license-MIT-1565C0.svg?style=for-the-badge)](#)
 [![Maintained](https://img.shields.io/badge/maintained-yes-22C55E.svg?style=for-the-badge)](#)
 
@@ -36,9 +36,10 @@ inputs used by the planner.
   EV charger starts drawing power.
 - **Multi-brand control.** Built-in adapters support Zendure, Marstek, and
   generic number-based battery controls.
-- **Live peak and solar assistance.** An optional real-time layer can respond to
-  unexpected demand peaks or surplus solar without consuming energy reserved
-  by the hourly plan.
+- **Live peak and solar assistance.** An optional real-time layer responds to
+  unexpected demand peaks and surplus solar. It can also use conservatively
+  forecast solar that would otherwise no longer fit in the battery to reduce
+  grid import before that solar arrives.
 - **Explainable operation.** Advice entities expose the complete plan, reason,
   next action, reserve, inputs, and recent decision history.
 - **Local and dependency-free.** The planner runs locally in Home Assistant and
@@ -111,6 +112,20 @@ Generic forecasts may use `datetime`, `start`, or `from` for the timestamp and
 If the forecast begins at the next hour, Wattson inserts the current sensor
 price for the active hour so that it does not execute a future setpoint early.
 
+### Solar forecast treatment
+
+The packaged forecast calibration is `pv_bias = 1.0`: forecast energy is not
+scaled up. Current PV power is taken from the live power sensor. Forecast
+quality remains installation-specific, so it should be checked against actual
+daily production before active control is enabled.
+
+Solar-backed real-time discharge is deliberately more conservative than the
+hourly plan. It uses only the remaining complete hours of the current day,
+counts 75% of forecast PV, subtracts expected household load and the battery's
+existing free capacity, and keeps an additional 0.75 kWh uncertainty buffer.
+Only the energy still expected not to fit in the battery becomes available for
+early discharge.
+
 ## Battery adapters
 
 ### Zendure
@@ -128,9 +143,24 @@ It uses:
   match every charge/discharge command);
 - optional HEMS/AI-state and measured charge/discharge sensors.
 
-Normal discharge uses the device's native P1 matching. Wattson also limits the
-device output to the planned setpoint. If the battery's own HEMS/AI mode is
-active, Wattson continues publishing advice but does not issue commands.
+Normal discharge uses a stable manual setpoint. Wattson reconstructs household
+demand from P1 plus measured battery output, raises the setpoint immediately
+when demand increases, and cuts it back immediately when P1 export appears.
+This deliberately gives the real-time target a single owner: Wattson changes
+the manager's manual-power entity, while the Zendure manager alone translates
+that target to the device's physical `outputLimit`. Running native
+`smart_discharging` alongside Wattson's tracking loop made both controllers
+write the same target and caused repeated zero-output intervals. If the
+battery's own HEMS/AI mode is active, Wattson continues publishing advice but
+does not issue commands.
+
+Zendure's native `smart_charging` mode owns the physical input limit while it
+tracks solar export. Configure the Zendure Manager fuse group to the same
+ceiling as Wattson's maximum charge power (for example `group2000` for 2000 W).
+This lets native matching respect the configured ceiling without Wattson and
+the vendor manager repeatedly overwriting each other's input limit. The input
+limit, output limit, and AC-mode entities are also used for directional safety
+stops and must refer to the same physical battery.
 
 ### Marstek
 
@@ -174,15 +204,14 @@ The planner sets an hourly target, but household demand changes by the second.
 Wattson therefore tracks demand asymmetrically, because the two directions
 have different urgency:
 
-- **Giving headroom is urgent.** While the discharge limit (Zendure) or
-  setpoint (Marstek/Generic) sits below actual demand, the difference is drawn
-  from the grid. This runs event-driven on the P1 meter, so the battery follows
-  a consumption spike within seconds rather than waiting for the next replan.
-- **Taking headroom back can be lazy.** A limit above demand costs nothing:
-  native matching never exports, and on fixed-setpoint adapters the discharge
-  guard cuts back immediately on P1 export. Reductions therefore run on a
-  30-second loop, which also promotes fixed valley charging to native surplus
-  matching as soon as surplus appears.
+- **Giving headroom is urgent.** While the setpoint sits below actual demand,
+  the difference is drawn from the grid. This runs event-driven on the P1
+  meter, so the battery follows a consumption spike within seconds rather than
+  waiting for the next replan.
+- **Taking headroom back is guarded.** Zendure, Marstek, and Generic normal
+  discharge use fixed setpoints. The discharge guard cuts back immediately on
+  P1 export; a 30-second loop also trims stale headroom and promotes fixed
+  valley charging to native surplus matching as soon as surplus appears.
 
 ### Adding a new brand adapter
 
@@ -196,11 +225,12 @@ adapter's declared capabilities rather than its name:
 - declare `AdapterCaps` honestly — `p1_matching` decides whether Wattson runs
   its own export guard, `surplus_mode` whether solar-surplus assist can use a
   native mode, and `min_setpoint_w` the smallest useful setpoint;
-- register the class in `create_adapter` and run the contract suite:
-  `python tests/contract_tests.py`. It exercises every adapter against a fake
-  Home Assistant: command translation, P1 capping, unit conversion (W/kW/MW),
-  emergency stops, and stale-telemetry handling. A new adapter is expected to
-  pass the same scenarios.
+- register the class in `create_adapter` and run both standalone suites:
+  `python tests/contract_tests.py` and `python tests/planner_tests.py`. They
+  exercise command translation, P1 capping, unit conversion (W/kW/MW),
+  emergency stops, stale telemetry, cumulative reserve calculation,
+  solar-backed budgeting, and ineffective boundary actions. A new adapter is
+  expected to pass the same contract scenarios.
 
 Adapter requests with a working entity mapping (what does your battery expose
 in Home Assistant?) are welcome as GitHub issues.
@@ -267,7 +297,11 @@ The advice sensor exposes:
 - `reden` — why Wattson selected the current action;
 - `volgende_actie` — the next planned charge or discharge action;
 - `historie` — the last 50 decisions with timestamp, setpoint, and reason;
-- `reserve_kwh` — energy reserved for later actions;
+- `reserve_kwh` — the largest cumulative battery-energy shortfall along the
+  future plan; future charging offsets later discharge, so the same energy is
+  not reserved repeatedly;
+- `zon_gedekt_beschikbaar_kwh` — energy that may be used now because the
+  conservative same-day solar forecast is expected to refill it;
 - `berekend_met` — the price, load, PV, EV, SoC, and horizon inputs;
 - `fout` — the most important current planning or watchdog error.
 
@@ -281,8 +315,17 @@ With `switch.wattson_bijspringen` enabled, Wattson adds a throttled real-time
 layer above the hourly plan:
 
 - **Peak assist** discharges during an unexpected demand peak only when the
-  current price is above the efficiency-adjusted recharge price and the planned
-  reserve remains untouched.
+  current price is above the efficiency-adjusted recharge price, or when the
+  same energy is already scheduled for a later, no-more-valuable discharge
+  hour. It normally starts above 400 W import and preserves the cumulative plan
+  reserve.
+- **Solar-backed import assist** may start from 50 W import when the
+  conservative same-day PV calculation leaves energy that would otherwise no
+  longer fit in the battery. It may temporarily use energy inside the normal
+  plan reserve, but never the minimum-SoC margin, and recalculates the available
+  budget every ten minutes. Once active it stays on until reconstructed demand
+  remains below 40 W, avoiding a start/stop cycle around the old 150 W stop
+  threshold.
 - **Solar-surplus assist** stores unexpected solar export when a more valuable
   future hour is available.
 - Start/stop decisions use the P1 flow reconstructed without Wattson's own
@@ -290,6 +333,29 @@ layer above the hourly plan:
   therefore no longer cancels its own assist action.
 - The EV guard always takes priority.
 - Hysteresis avoids rapid switching around the start and stop thresholds.
+
+## Price and export model
+
+The hourly planner values both sides of the meter. For each forecast hour,
+Wattson derives the export price as the import price minus the configured model
+wedge (currently €0.02/kWh). The dynamic program then includes import cost,
+export revenue, conversion losses, and the selected battery-degradation cost.
+
+This export price has two separate roles:
+
+- exported household/PV energy is credited at the modeled export price in every
+  candidate plan;
+- deliberate battery export is additionally gated by
+  `switch.wattson_verkopen` and the configured selling threshold.
+
+Solar-backed import assist is an intentional exception to strict price
+optimization. Once conservative forecast solar is expected not to fit, that
+real-time layer prioritizes reducing current grid import and making room in the
+battery. It does **not currently compare the avoided import price now with the
+opportunity value of exporting that future solar**. The hourly plan itself does
+make the export-price comparison; users who require strict cash optimization
+should leave real-time assistance off until an export-opportunity check is
+added.
 
 ## Selling
 
@@ -316,6 +382,9 @@ the forgone advantage; the switch happens as soon as the cumulative benefit
 exceeds the threshold. Genuinely profitable actions (peak discharge, valley
 charging) pass immediately, and the maximum forgone margin per mode change is
 bounded by the threshold. Selling and all safety stops are never damped.
+An active mode that can no longer produce at least 50 W because of SoC, PV, or
+load constraints bypasses the damping immediately instead of remaining stuck
+in an ineffective charge/discharge state.
 
 ## Safety behavior
 
@@ -359,9 +428,10 @@ watchdog and stale-data guard every minute.
 
 ### Can Wattson guarantee zero export?
 
-Zendure's native P1 matching provides the strongest behavior. Generic and
-Marstek use a software guard and can react only after updated P1 telemetry is
-received. Always configure a device-level export limit when available.
+No software controller can guarantee it between meter updates. Normal
+discharge uses Wattson's event-driven P1 guard for Zendure, Generic, and
+Marstek and can react only after updated P1 telemetry is received. Always
+configure a device-level export limit when available.
 
 ### Is the expected plan benefit a savings guarantee?
 

@@ -48,6 +48,7 @@ class WattsonAdviesSensor(SensorEntity):
                 else "uit"
             ),
             "reserve_kwh": round(c.reserve_kwh, 2),
+            "zon_gedekt_beschikbaar_kwh": round(c.solar_backed_kwh, 2),
             "historie": list(c.history),
             "agressiviteit": c.aggressiveness,
             "adapter": c.adapter,

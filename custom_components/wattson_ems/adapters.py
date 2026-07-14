@@ -13,6 +13,7 @@ Een nieuw accumerk toevoegen = één subclass met entity-mapping + caps,
 registreren in `create_adapter`, en de contract-suite groen draaien.
 """
 import logging
+import math
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -109,6 +110,13 @@ async def set_number(hass, entity: str, value) -> None:
                 value = min(float(value), float(hi))
             if lo is not None:
                 value = max(float(value), float(lo))
+        except (TypeError, ValueError):
+            pass
+        # ongewijzigd = niet schrijven: elke write herstart de regelaar van
+        # het apparaat kort (zichtbaar als ~40 s idle-dip + relais-tik)
+        try:
+            if math.isclose(float(st.state), float(value), rel_tol=1e-3, abs_tol=1e-3):
+                return
         except (TypeError, ValueError):
             pass
     await hass.services.async_call(
@@ -210,36 +218,49 @@ class BatteryAdapter:
 class ZendureAdapter(BatteryAdapter):
     """Zendure SolarFlow via de Zendure-HA-integratie.
 
-    Ontladen gebeurt met de P1-matching van het apparaat zelf (kan niet
-    exporteren); de output-limiet wordt begrensd op het geplande setpoint.
-    Noodstops zetten de limiet van de foute richting op apparaatniveau dicht.
+    Normaal ontladen gebruikt een vast manual-setpoint. Wattson volgt de P1 en
+    bewaakt export; de Zendure-manager is daarmee de enige schrijver van de
+    fysieke outputLimit. Native smart_discharging tegelijk met Wattsons
+    volglus liet twee regelaars aan dezelfde target trekken en veroorzaakte
+    herhaald 10--40 s nulvermogen. Native smart_charging blijft beschikbaar
+    voor PV-overschot. Noodstops zetten de target van de foute richting dicht.
     """
 
     name = "zendure"
-    caps = AdapterCaps(p1_matching=True, device_limits=True, surplus_mode=True,
-                       control_latency_s=5.0, min_setpoint_w=100.0)
+    caps = AdapterCaps(p1_matching=False, device_limits=True, surplus_mode=True,
+                       control_latency_s=5.0, min_setpoint_w=50.0)
 
     def telemetry_entities(self):
         return (self.c.ent_zd_chg, self.c.ent_zd_dis)
 
     async def apply(self, action, power_w, *, p1_cap=True):
+        c = self.c
+        if action in ("laden", "laden_overschot") and c._tripped == "laden":
+            return 0.0
+        if action in ("ontladen", "verkopen") and c._tripped == "ontladen":
+            return 0.0
         if action == "laden_overschot":
             # MATCHING_CHARGE: het apparaat volgt het overschot zelf op P1
             await self._set_mode("smart_charging", 0.0)
             return power_w
         if action == "laden":
-            await self._set_mode("manual", -power_w)
-            return power_w
+            p = min(power_w, c.params.p_charge_max_w)
+            await self._set_mode("manual", -p)
+            return p
         if action == "verkopen":
             # vast ontlaadvermogen; wat het huis niet opneemt gaat het net op
-            p = min(power_w, self.c.params.p_discharge_max_w)
+            p = min(power_w, c.params.p_discharge_max_w)
             await self._set_mode("manual", p)
             return p
         if action == "ontladen":
-            # smart_discharging = P1-matching: volgt de huisvraag; de
-            # output-limiet mag niet verder open dan het plan wil
-            await self._set_mode("smart_discharging", 0.0, dis_limit_w=power_w)
-            return power_w
+            # Eén regellus: Wattson berekent het vaste doel; de Zendure-manager
+            # vertaalt manual_power naar het apparaat. Hij mag als enige de
+            # fysieke outputLimit schrijven.
+            p = min(power_w, c.params.p_discharge_max_w)
+            if p1_cap:
+                p = self._p1_capped(p)
+            await self._set_mode("manual", p)
+            return p
         await self._set_mode("off", 0.0)
         # sluiplek dicht: met een open output-limiet blijft het apparaat in
         # 'off' ~50 W aan het huis leveren (±1,2 kWh/dag). De input-limiet
@@ -268,7 +289,7 @@ class ZendureAdapter(BatteryAdapter):
             await set_power_number(self.c.hass, self.c.ent_zd_inlim, 0)
             await set_power_number(self.c.hass, self.c.ent_zd_outlim, 0)
 
-    async def _set_mode(self, mode, manual_w, dis_limit_w=None):
+    async def _set_mode(self, mode, manual_w):
         c = self.c
         # ac_mode zelf meesturen: het apparaat laadt alleen via AC als de
         # ac_mode op 'input' staat en ontlaadt alleen op 'output'; de
@@ -286,18 +307,11 @@ class ZendureAdapter(BatteryAdapter):
                     await c.hass.services.async_call(
                         "select", "select_option",
                         {"entity_id": c.ent_zd_acmode, "option": gewenst}, blocking=True)
-        # zorg dat de apparaatlimieten open staan voor de gevraagde richting
-        # (een eerdere noodstop-0 blijft anders de sturing stil blokkeren);
-        # na een noodstop opent alleen de niet-getripte richting
-        if mode in ("manual", "smart_charging", "store_solar") and c._tripped != "laden":
-            if manual_w <= 0:  # manual laden of matching-laden
-                await set_power_number(c.hass, c.ent_zd_inlim, c.params.p_charge_max_w)
-        if mode in ("smart_discharging", "smart") or (mode == "manual" and manual_w > 0):
-            if c._tripped != "ontladen":
-                cap = c.params.p_discharge_max_w
-                if dis_limit_w is not None and dis_limit_w > 0:
-                    cap = min(max(dis_limit_w, self.caps.min_setpoint_w), cap)
-                await set_power_number(c.hass, c.ent_zd_outlim, cap)
+        # Geen normale actie schrijft ent_zd_inlim/outlim rechtstreeks. Dat
+        # zijn bij Zendure geen onafhankelijke plafonds maar de actuele fysieke
+        # targets die de manager ook schrijft. Twee schrijvers veroorzaakten
+        # limiet-pingpong en herstarts. Alleen rust/noodstop gebruikt ze nog als
+        # harde directionele stop; een volgende manageractie opent de richting.
         cur = c.hass.states.get(c.ent_zd_operation)
         if mode == "manual":
             await set_power_number(c.hass, c.ent_zd_manual, manual_w)
