@@ -122,6 +122,10 @@ ASSIST_THROTTLE_S = 15     # minimale tijd tussen assist-beslissingen (P1 komt
 ASSIST_SOC_MARGE_KWH = 0.15
 ASSIST_MAX_SOC_MARGIN_KWH = 0.05  # laad-assist stopt voor de absolute bovengrens
 ASSIST_POWER_DEADBAND_W = 50      # voorkom setpoint-calls voor meetruis
+DISCHARGE_EXPORT_ABORT_W = 150    # bronexport die zelfs bij het volledige nog
+                                  # niet gemeten ontlaadcommando overblijft
+DISCHARGE_EXPORT_ABORT_HOLD_S = 15  # bevestig over meerdere P1-updates; normale
+                                    # smart-charge-regelruis bleef binnen ±124 W
 ASSIST_STOP_GRACE_S = 150  # "piek/overschot voorbij" moet zo lang aanhouden
                            # voordat de assist echt stopt: vangt wolk-dips en
                            # stale telemetrie af zonder relais-gecycle; native

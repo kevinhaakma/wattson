@@ -114,6 +114,30 @@ def setpoint_feedback_settled(command_w: float, measured_w: float | None,
             and abs(float(measured_w) - float(command_w)) <= deadband_w)
 
 
+def conservative_source_p1(p1_w: float, commanded_discharge_w: float,
+                           measured_discharge_w: float | None) -> float:
+    """Bovengrens voor bron-P1 bij een nog niet bevestigd vast setpoint.
+
+    Tijdens cloudlatentie kan het apparaat al meer ontladen dan de telemetrie
+    meldt. Door het maximum van commando en meting terug bij P1 op te tellen,
+    noemen we iets alleen bronexport als die export zelfs bij het ongunstigste
+    nog mogelijke accuvermogen overblijft.
+    """
+    measured = 0.0 if measured_discharge_w is None else measured_discharge_w
+    discharge = max(commanded_discharge_w, measured, 0.0)
+    return p1_without_battery(p1_w, discharge_w=discharge)
+
+
+def export_recovery_state(source_p1_w: float, *, threshold_w: float,
+                          now_s: float, since_s: float | None,
+                          hold_s: float) -> tuple[float | None, bool]:
+    """Werk de bevestigingstimer voor aanhoudende sterke bronexport bij."""
+    if source_p1_w > -threshold_w:
+        return None, False
+    since = now_s if since_s is None else since_s
+    return since, now_s - since >= hold_s
+
+
 async def set_number(hass, entity: str, value) -> None:
     """Zet een number-entity, geclampt op haar eigen min/max.
 

@@ -7,7 +7,7 @@
 **Explainable smart home battery control for Home Assistant**
 
 [![HACS Custom](https://img.shields.io/badge/HACS-Custom-1565C0.svg?style=for-the-badge)](https://github.com/hacs/integration)
-[![Version](https://img.shields.io/badge/version-1.9.0-00B4B0.svg?style=for-the-badge)](#)
+[![Version](https://img.shields.io/badge/version-1.9.1-00B4B0.svg?style=for-the-badge)](#)
 [![License](https://img.shields.io/badge/license-MIT-1565C0.svg?style=for-the-badge)](#)
 [![Maintained](https://img.shields.io/badge/maintained-yes-22C55E.svg?style=for-the-badge)](#)
 
@@ -219,6 +219,10 @@ have different urgency:
   discharge use fixed setpoints. The discharge guard cuts back immediately on
   P1 export; a 30-second loop also trims stale headroom and promotes fixed
   valley charging to native surplus matching as soon as surplus appears.
+  For surplus-capable batteries, confirmed source export also closes manual
+  discharge and resumes native surplus charging without waiting for the next
+  planner or assist-stop interval. Source export is calculated conservatively:
+  the full unconfirmed discharge command is removed before the guard decides.
 
 ### Adding a new brand adapter
 
@@ -238,8 +242,9 @@ adapter's declared capabilities rather than its name:
   exercise command translation, P1 capping, unit conversion (W/kW/MW),
   emergency stops, stale telemetry, cumulative reserve calculation,
   solar-backed budgeting, ineffective boundary actions, EV at-home gates, and
-  fixed-setpoint feedback acknowledgement. A new adapter is expected to pass
-  the same contract scenarios.
+  fixed-setpoint feedback acknowledgement, and recovery from confirmed source
+  export during discharge. A new adapter is expected to pass the same contract
+  scenarios.
 
 Adapter requests with a working entity mapping (what does your battery expose
 in Home Assistant?) are welcome as GitHub issues.

@@ -90,6 +90,8 @@ from .const import (
     CONF_SELL_THRESHOLD,
     DAGLICHT,
     DEFAULT_OPTIONS,
+    DISCHARGE_EXPORT_ABORT_HOLD_S,
+    DISCHARGE_EXPORT_ABORT_W,
     DIS_GUARD_DEADBAND_W,
     DIS_GUARD_THROTTLE_S,
     DWELL_OVERRIDE_EUR,
@@ -220,6 +222,8 @@ class WattsonCoordinator:
         self._vraag_hist: list[tuple[float, float]] = []  # (t, vraag) voor terugneem-grace
         self._track_fast_last = 0.0
         self._dis_guard_last = 0.0
+        self._export_recovery_since: float | None = None
+        self._export_recovery_pending = False
         self._switch_debt = 0.0        # opgeteld gemist voordeel van gedempte modewissels
         self._last_load_w: float | None = None  # huisvraag vorige tick (EV-sprong-detectie)
         self.listeners: list = []
@@ -264,6 +268,12 @@ class WattsonCoordinator:
                 # ontlaadvermogen zodra de huisvraag zakt
                 self.listeners.append(async_track_state_change_event(
                     self.hass, [self.ent_p1], self._discharge_guard))
+            if self.caps.surplus_mode:
+                # Sterke, bevestigde bronexport tijdens (ook al naar 0 W
+                # teruggeregeld) ontladen mag niet tot de volgende plan-/stop-
+                # timer in manual blijven hangen: promoveer naar surplusladen.
+                self.listeners.append(async_track_state_change_event(
+                    self.hass, [self.ent_p1], self._export_recovery_check))
         await self._tick(None)
 
     async def async_stop(self) -> None:
@@ -1062,6 +1072,8 @@ class WattsonCoordinator:
         self._last_action = action
         self._last_charge_w = applied if action in ("laden", "laden_overschot") else 0.0
         self._last_discharge_w = applied if action in ("ontladen", "verkopen") else 0.0
+        if action != "ontladen":
+            self._export_recovery_since = None
         if action == "ontladen" and self.caps.p1_matching:
             # referentie voor de volglus: dit is wat de adapter als limiet schreef
             self._tracked_outlim = applied
@@ -1132,6 +1144,102 @@ class WattsonCoordinator:
             s.async_write_ha_state()
 
     @callback
+    def _export_recovery_check(self, _event) -> None:
+        """Herstel uit manual-ontladen als echte bronexport blijft staan.
+
+        De berekening is bewust conservatief: ook het volledige gecommandeerde
+        ontlaadvermogen wordt bij P1 teruggeteld als de fysieke telemetrie nog
+        achterloopt. Alleen export die dán nog overblijft kan niet door de accu
+        zelf zijn veroorzaakt. Een korte hold voorkomt reageren op regelruis.
+        """
+        active = (
+            self.control_enabled
+            and not self._tripped
+            and self.caps.surplus_mode
+            and self._last_action == "ontladen"
+            and self.advies in ("ontladen", "bijspringen: ontladen")
+        )
+        if not active:
+            self._export_recovery_since = None
+            return
+        p1 = self._fresh_power_w(self.ent_p1, 60)
+        if p1 is None:
+            self._export_recovery_since = None
+            return
+        source_p1 = A.conservative_source_p1(
+            p1,
+            self._last_discharge_w,
+            self._discharge_feedback(),
+        )
+        now = time.monotonic()
+        self._export_recovery_since, ready = A.export_recovery_state(
+            source_p1,
+            threshold_w=DISCHARGE_EXPORT_ABORT_W,
+            now_s=now,
+            since_s=self._export_recovery_since,
+            hold_s=DISCHARGE_EXPORT_ABORT_HOLD_S,
+        )
+        if ready and not self._export_recovery_pending:
+            self._export_recovery_pending = True
+            self.hass.async_create_task(self._export_recovery_apply())
+
+    async def _export_recovery_apply(self) -> None:
+        """Stop vastgelopen ontladen en promoveer bruikbare export naar laden."""
+        try:
+            if not (self.control_enabled and not self._tripped
+                    and self.caps.surplus_mode and self._last_action == "ontladen"):
+                return
+            p1 = self._fresh_power_w(self.ent_p1, 60)
+            if p1 is None:
+                return
+            source_p1 = A.conservative_source_p1(
+                p1,
+                self._last_discharge_w,
+                self._discharge_feedback(),
+            )
+            if source_p1 > -DISCHARGE_EXPORT_ABORT_W:
+                return  # export verdween tussen callback en service-call
+
+            prev = (self.advies, self.last_applied)
+            soc_pct = self._f(self.ent_soc)
+            prijs = self._current_price()
+            can_store = (soc_pct is not None and
+                         soc_pct / 100.0 * self.params.capacity_kwh
+                         < self.params.soc_max_kwh - ASSIST_MAX_SOC_MARGIN_KWH)
+            eta_rt = P.eta_oneway(800.0, self.params) ** 2
+            charge_economic = (prijs is not None and
+                               self._max_future * eta_rt > prijs)
+
+            # Eerst expliciet rust: daarmee sluit de uitrichting en krijgt de
+            # watchdog stop-grace voor eventuele fysieke uitloop. Daarna pas
+            # de tegengestelde richting openen.
+            self.assist_active = None
+            self._assist_end_since = None
+            await self._set_battery("rust", 0.0)
+            if can_store and charge_economic:
+                target = min(max(-source_p1, self.caps.min_setpoint_w),
+                             self.params.p_charge_max_w)
+                await self._set_battery("laden_overschot", target)
+                self.assist_active = "laden"
+                self._assist_started = time.monotonic()
+                self.advies = "bijspringen: laden"
+                self.setpoint_w = round(self._last_charge_w)
+                self.reden = (f"sterke bronexport {-source_p1:.0f} W bevestigd — "
+                              "ontladen afgebroken en overschotladen hervat")
+            else:
+                self.advies = "rust"
+                self.setpoint_w = 0.0
+                waarom = "accu vrijwel vol" if not can_store else "opslaan niet economisch"
+                self.reden = (f"sterke bronexport {-source_p1:.0f} W bevestigd — "
+                              f"ontladen afgebroken ({waarom})")
+            self._log_decision(prev)
+            for s in self.sensors:
+                s.async_write_ha_state()
+        finally:
+            self._export_recovery_since = None
+            self._export_recovery_pending = False
+
+    @callback
     def _assist_check(self, _event) -> None:
         """Realtime laag: bijspringen op pieken en zonoverschot (throttled)."""
         if not (self.control_enabled and self.assist_enabled):
@@ -1146,7 +1254,7 @@ class WattsonCoordinator:
 
     async def _assist_apply(self) -> None:
         await self._watchdog()
-        if self._tripped:
+        if self._tripped or self._export_recovery_pending:
             return
         p1 = self._fresh_power_w(self.ent_p1, 120)
         soc_pct = self._f(self.ent_soc)
