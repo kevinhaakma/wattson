@@ -9,6 +9,15 @@ CONF_ENT_SOC = "ent_soc"
 CONF_ENT_P1 = "ent_p1"
 CONF_ENT_WALLBOX_1 = "ent_wallbox_1"
 CONF_ENT_WALLBOX_2 = "ent_wallbox_2"
+# thuis-gate per EV-meting (optioneel): voertuig-telemetrie zoals
+# sensor.<auto>_charger_power meet óók laden elders (openbare lader), en de
+# EV-guard zou de accu dan onnodig blokkeren terwijl de auto niet eens thuis
+# is (incident 2026-07-14). Met een device_tracker/person/binary_sensor als
+# gate telt de bijbehorende wallbox-meting alleen mee als die entiteit
+# 'home'/'on' meldt; unknown/unavailable telt als thuis (fail-safe: liever
+# onnodig conservatief dan de auto uit de accu voeden).
+CONF_ENT_WALLBOX_1_HOME = "ent_wallbox_1_thuis"
+CONF_ENT_WALLBOX_2_HOME = "ent_wallbox_2_thuis"
 CONF_ENT_PV_NOW = "ent_pv_now"
 CONF_ENT_PV_REMAIN = "ent_pv_remain"
 CONF_ENT_PV_TOMORROW = "ent_pv_tomorrow"
@@ -69,6 +78,8 @@ DEFAULT_OPTIONS = {
     CONF_ENT_P1: "",
     CONF_ENT_WALLBOX_1: "",
     CONF_ENT_WALLBOX_2: "",
+    CONF_ENT_WALLBOX_1_HOME: "",
+    CONF_ENT_WALLBOX_2_HOME: "",
     CONF_ENT_PV_NOW: "",
     CONF_ENT_PV_REMAIN: "",
     CONF_ENT_PV_TOMORROW: "",

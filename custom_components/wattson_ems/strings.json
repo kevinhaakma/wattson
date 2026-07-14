@@ -17,6 +17,8 @@
           "ent_p1": "Grid power (+ import / - export)",
           "ent_wallbox_1": "EV charger power 1 (optional)",
           "ent_wallbox_2": "EV charger power 2 (optional)",
+          "ent_wallbox_1_thuis": "EV 1 at-home gate (optional; charging elsewhere is ignored)",
+          "ent_wallbox_2_thuis": "EV 2 at-home gate (optional; charging elsewhere is ignored)",
           "ent_pv_now": "Current PV power (optional)",
           "ent_pv_remain": "PV energy remaining today (optional)",
           "ent_pv_tomorrow": "PV energy tomorrow (optional)"
@@ -77,6 +79,8 @@
           "ent_p1": "P1 meter power sensor",
           "ent_wallbox_1": "Wallbox / EV charger power 1 (optional)",
           "ent_wallbox_2": "Wallbox / EV charger power 2 (optional)",
+          "ent_wallbox_1_thuis": "EV 1 at-home gate (optional; charging elsewhere is ignored)",
+          "ent_wallbox_2_thuis": "EV 2 at-home gate (optional; charging elsewhere is ignored)",
           "ent_pv_now": "Current PV production",
           "ent_pv_remain": "PV yield remaining today (forecast)",
           "ent_pv_tomorrow": "PV yield forecast tomorrow",

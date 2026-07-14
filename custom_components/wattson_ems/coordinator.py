@@ -73,7 +73,9 @@ from .const import (
     CONF_ENT_PV_TOMORROW,
     CONF_ENT_SOC,
     CONF_ENT_WALLBOX_1,
+    CONF_ENT_WALLBOX_1_HOME,
     CONF_ENT_WALLBOX_2,
+    CONF_ENT_WALLBOX_2_HOME,
     CONF_ENT_ZD_CHG,
     CONF_ENT_ZD_DIS,
     CONF_ENT_ZD_ACMODE,
@@ -129,6 +131,8 @@ class WattsonCoordinator:
         self.ent_p1 = o(CONF_ENT_P1)
         self.ent_wallbox_1 = o(CONF_ENT_WALLBOX_1)
         self.ent_wallbox_2 = o(CONF_ENT_WALLBOX_2)
+        self.ent_wallbox_1_home = o(CONF_ENT_WALLBOX_1_HOME)
+        self.ent_wallbox_2_home = o(CONF_ENT_WALLBOX_2_HOME)
         self.ent_pv_now = o(CONF_ENT_PV_NOW)
         self.ent_pv_remain = o(CONF_ENT_PV_REMAIN)
         self.ent_pv_tomorrow = o(CONF_ENT_PV_TOMORROW)
@@ -236,8 +240,14 @@ class WattsonCoordinator:
         # snelle volglus: stuurwaarden bijregelen op de gemeten vraag
         self.listeners.append(async_track_time_interval(
             self.hass, self._track_tick, timedelta(seconds=TRACK_INTERVAL_S)))
-        self.listeners.append(async_track_state_change_event(
-            self.hass, [self.ent_wallbox_1, self.ent_wallbox_2], self._ev_guard))
+        ev_entities = list(filter(None, (
+            self.ent_wallbox_1, self.ent_wallbox_2,
+            # gates ook volgen: aankomst/vertrek moet de guard herevalueren
+            self.ent_wallbox_1_home, self.ent_wallbox_2_home,
+        )))
+        if ev_entities:
+            self.listeners.append(async_track_state_change_event(
+                self.hass, ev_entities, self._ev_guard))
         if self.ent_p1:
             ent_chg, ent_dis = self._bat_flow_entities()
             assist_entities = list(dict.fromkeys(filter(None, (
@@ -313,11 +323,32 @@ class WattsonCoordinator:
         value = self._f(self.ent_price)
         return None if value is None else self._price_eur_kwh(value, self._unit(self.ent_price))
 
+    # thuis-gate: alleen een expliciete 'elders'-status schakelt een wallbox-
+    # meting uit; geen gate, onbekend of unavailable telt als thuis (fail-safe)
+    _EV_HOME_STATES = ("home", "on", "true", "thuis")
+    _EV_GATE_UNKNOWN = ("unknown", "unavailable", "none", "")
+
+    def _ev_at_home(self, gate: str) -> bool:
+        if not gate:
+            return True
+        st = self.hass.states.get(gate)
+        if st is None or st.state.lower() in self._EV_GATE_UNKNOWN:
+            return True
+        return st.state.lower() in self._EV_HOME_STATES
+
+    def _wallbox_w(self, ent: str, gate: str, fresh_s: float | None = None) -> float:
+        """EV-laadvermogen dat als THUIS-last telt. Voertuigtelemetrie
+        (bijv. sensor.<auto>_charger_power) meet ook laden elders; met een
+        geconfigureerde thuis-gate telt die meting dan niet mee."""
+        if not ent or not self._ev_at_home(gate):
+            return 0.0
+        w = self._power_w(ent) if fresh_s is None else self._fresh_power_w(ent, fresh_s)
+        return w or 0.0
+
     def _ev_charging(self) -> bool:
-        w1 = self._power_w(self.ent_wallbox_1)
-        w2 = self._power_w(self.ent_wallbox_2)
         threshold_w = EV_THRESHOLD_KW * 1000.0
-        return (w1 or 0.0) > threshold_w or (w2 or 0.0) > threshold_w
+        return (self._wallbox_w(self.ent_wallbox_1, self.ent_wallbox_1_home) > threshold_w
+                or self._wallbox_w(self.ent_wallbox_2, self.ent_wallbox_2_home) > threshold_w)
 
     def _bat_flow_entities(self) -> tuple[str, str]:
         """(laad-, ontlaad-)telemetrie-entiteit voor de actieve adapter."""
@@ -704,8 +735,8 @@ class WattsonCoordinator:
         # het plan het huisdeel bedienen (de apply-laag begrenst de
         # output-limiet daarbovenop nogmaals op huislast).
         wb_fresh_w = max(
-            self._fresh_power_w(self.ent_wallbox_1, 180) or 0.0,
-            self._fresh_power_w(self.ent_wallbox_2, 180) or 0.0,
+            self._wallbox_w(self.ent_wallbox_1, self.ent_wallbox_1_home, 180),
+            self._wallbox_w(self.ent_wallbox_2, self.ent_wallbox_2_home, 180),
         )
         ev_blind = ev_now and wb_fresh_w <= EV_THRESHOLD_KW * 1000.0
 
@@ -723,8 +754,8 @@ class WattsonCoordinator:
                 # De twee bronnen kunnen twee laders zijn, maar ook wallbox +
                 # voertuigtelemetrie van dezelfde sessie; max voorkomt dubbel tellen.
                 wb_w = max(
-                    self._power_w(self.ent_wallbox_1) or 0.0,
-                    self._power_w(self.ent_wallbox_2) or 0.0,
+                    self._wallbox_w(self.ent_wallbox_1, self.ent_wallbox_1_home),
+                    self._wallbox_w(self.ent_wallbox_2, self.ent_wallbox_2_home),
                 )
                 if p1 is not None:
                     # actuele huisvraag excl. EV én excl. het eigen accuvermogen
@@ -962,8 +993,8 @@ class WattsonCoordinator:
             # voeden. Voorwaarde: verse wallbox-telemetrie — anders het oude
             # veilige gedrag (rust).
             self.assist_active = None
-            wb_fresh = ((self._fresh_power_w(self.ent_wallbox_1, 180) or 0.0)
-                        + (self._fresh_power_w(self.ent_wallbox_2, 180) or 0.0))
+            wb_fresh = (self._wallbox_w(self.ent_wallbox_1, self.ent_wallbox_1_home, 180)
+                        + self._wallbox_w(self.ent_wallbox_2, self.ent_wallbox_2_home, 180))
             huis_w = min(max(steps[0].load_w, 0.0), self.params.p_discharge_max_w)
             if wb_fresh > EV_THRESHOLD_KW * 1000.0 and huis_w >= EV_HOUSE_MIN_W:
                 # BEWUST het "verkopen"-pad: dat omzeilt de normale P1-cap,

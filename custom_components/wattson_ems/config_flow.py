@@ -34,7 +34,9 @@ from .const import (
     CONF_ENT_PV_TOMORROW,
     CONF_ENT_SOC,
     CONF_ENT_WALLBOX_1,
+    CONF_ENT_WALLBOX_1_HOME,
     CONF_ENT_WALLBOX_2,
+    CONF_ENT_WALLBOX_2_HOME,
     CONF_ENT_ZD_ACMODE,
     CONF_ENT_ZD_CHG,
     CONF_ENT_ZD_DIS,
@@ -58,6 +60,7 @@ from .const import (
 _OPTIONAL_ENTITY_KEYS = {
     None: [
         CONF_ENT_WALLBOX_1, CONF_ENT_WALLBOX_2,
+        CONF_ENT_WALLBOX_1_HOME, CONF_ENT_WALLBOX_2_HOME,
         CONF_ENT_PV_NOW, CONF_ENT_PV_REMAIN, CONF_ENT_PV_TOMORROW,
     ],  # adapter-onafhankelijk
     ADAPTER_ZENDURE: [CONF_ENT_ZD_ACMODE, CONF_ENT_ZD_HEMS, CONF_ENT_ZD_CHG, CONF_ENT_ZD_DIS],
@@ -94,6 +97,14 @@ def _source_schema(options: dict) -> vol.Schema:
         _field(options, CONF_ENT_P1, "sensor"),
         _field(options, CONF_ENT_WALLBOX_1, "sensor", required=False),
         _field(options, CONF_ENT_WALLBOX_2, "sensor", required=False),
+        # voertuigtelemetrie meet ook laden elders; de gate beperkt de
+        # bijbehorende meting tot momenten dat het voertuig thuis is
+        _field(options, CONF_ENT_WALLBOX_1_HOME,
+               ["device_tracker", "person", "binary_sensor", "input_boolean"],
+               required=False),
+        _field(options, CONF_ENT_WALLBOX_2_HOME,
+               ["device_tracker", "person", "binary_sensor", "input_boolean"],
+               required=False),
         _field(options, CONF_ENT_PV_NOW, "sensor", required=False),
         _field(options, CONF_ENT_PV_REMAIN, "sensor", required=False),
         _field(options, CONF_ENT_PV_TOMORROW, "sensor", required=False),

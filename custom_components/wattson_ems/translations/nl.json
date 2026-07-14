@@ -17,6 +17,8 @@
           "ent_p1": "Netvermogen (+ import / - export)",
           "ent_wallbox_1": "Laadpaalvermogen 1 (optioneel)",
           "ent_wallbox_2": "Laadpaalvermogen 2 (optioneel)",
+          "ent_wallbox_1_thuis": "EV 1 thuis-gate (optioneel; laden elders telt niet mee)",
+          "ent_wallbox_2_thuis": "EV 2 thuis-gate (optioneel; laden elders telt niet mee)",
           "ent_pv_now": "Actueel PV-vermogen (optioneel)",
           "ent_pv_remain": "Resterende PV-energie vandaag (optioneel)",
           "ent_pv_tomorrow": "PV-energie morgen (optioneel)"
@@ -77,6 +79,8 @@
           "ent_p1": "P1-meter vermogen sensor",
           "ent_wallbox_1": "Wallbox / laadpaal vermogen 1 (optioneel)",
           "ent_wallbox_2": "Wallbox / laadpaal vermogen 2 (optioneel)",
+          "ent_wallbox_1_thuis": "EV 1 thuis-gate (optioneel; laden elders telt niet mee)",
+          "ent_wallbox_2_thuis": "EV 2 thuis-gate (optioneel; laden elders telt niet mee)",
           "ent_pv_now": "PV-productie nu",
           "ent_pv_remain": "PV-opbrengst resterend vandaag (forecast)",
           "ent_pv_tomorrow": "PV-opbrengst morgen (forecast)",
