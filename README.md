@@ -7,7 +7,7 @@
 **Explainable smart home battery control for Home Assistant**
 
 [![HACS Custom](https://img.shields.io/badge/HACS-Custom-1565C0.svg?style=for-the-badge)](https://github.com/hacs/integration)
-[![Version](https://img.shields.io/badge/version-1.6.1-00B4B0.svg?style=for-the-badge)](#)
+[![Version](https://img.shields.io/badge/version-1.9.0-00B4B0.svg?style=for-the-badge)](#)
 [![License](https://img.shields.io/badge/license-MIT-1565C0.svg?style=for-the-badge)](#)
 [![Maintained](https://img.shields.io/badge/maintained-yes-22C55E.svg?style=for-the-badge)](#)
 
@@ -162,6 +162,13 @@ the vendor manager repeatedly overwriting each other's input limit. The input
 limit, output limit, and AC-mode entities are also used for directional safety
 stops and must refer to the same physical battery.
 
+Low manual setpoints also require the Zendure manager to wake one idle device
+at its official 50 W start threshold. The compatibility patch used by the
+validated Home Assistant installation is versioned as
+`patches/zendure_ha-manual-idle-kickstart.patch`. HACS updates of `zendure_ha`
+can overwrite that third-party file; re-run the patch check after every such
+update before enabling active control.
+
 ### Marstek
 
 The Marstek adapter targets a Venus E/A/D through RS485/Modbus, for example
@@ -225,12 +232,14 @@ adapter's declared capabilities rather than its name:
 - declare `AdapterCaps` honestly — `p1_matching` decides whether Wattson runs
   its own export guard, `surplus_mode` whether solar-surplus assist can use a
   native mode, and `min_setpoint_w` the smallest useful setpoint;
-- register the class in `create_adapter` and run both standalone suites:
-  `python tests/contract_tests.py` and `python tests/planner_tests.py`. They
+- register the class in `create_adapter` and run all standalone suites:
+  `python tests/contract_tests.py`, `python tests/planner_tests.py`, and
+  `python tests/control_logic_tests.py`. They
   exercise command translation, P1 capping, unit conversion (W/kW/MW),
   emergency stops, stale telemetry, cumulative reserve calculation,
-  solar-backed budgeting, and ineffective boundary actions. A new adapter is
-  expected to pass the same contract scenarios.
+  solar-backed budgeting, ineffective boundary actions, EV at-home gates, and
+  fixed-setpoint feedback acknowledgement. A new adapter is expected to pass
+  the same contract scenarios.
 
 Adapter requests with a working entity mapping (what does your battery expose
 in Home Assistant?) are welcome as GitHub issues.
