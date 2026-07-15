@@ -62,8 +62,17 @@ class PlanValues:
         return self.lam.value(0, soc_kwh)
 
     def discharge_floor(self, soc_kwh: float) -> float:
-        """Minimale opbrengst (€/kWh, doel-euro's) waarbij ontladen nú loont."""
-        return P.discharge_price_floor(self.lam_now(soc_kwh), self.params)
+        """Minimale opbrengst (€/kWh, doel-euro's) waarbij ontladen nú loont.
+
+        Ontladen haalt energie uit het grid-vak ÓNDER de actuele SoC; λ van
+        het vak op de SoC zelf meet de waarde van toevoegen. Aan de bovenrand
+        lopen die sterk uiteen: bij een volle accu past er niets meer bij
+        (λ-boven ≈ 0) terwijl de opgeslagen energie de piekwaarde draagt
+        (gemeten 2026-07-15: λ 0,21 op vol vs 0,28-0,34 één vak lager —
+        de assist sprong daardoor bij tijdens het koken terwijl bewaren
+        voor de avondpiek strikt beter was)."""
+        step = self.lam.soc_step_kwh if self.lam else 0.0
+        return P.discharge_price_floor(self.lam_now(soc_kwh - step), self.params)
 
     def charge_ceiling(self, soc_kwh: float) -> float:
         """Maximale kostprijs (€/kWh, doel-euro's) waarbij laden nú loont."""
