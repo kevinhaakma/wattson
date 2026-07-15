@@ -139,6 +139,13 @@ ASSIST_MIN_RUN_S = 180     # opwarmtijd na assist-start: de accutelemetrie
                            # apparaat, dus "piek/overschot voorbij" is in dit
                            # venster geen geldig stopbewijs (harde stops zoals
                            # SoC-vol, EV en reserve blijven wél direct gelden)
+# demping laden <-> overschotladen (zelfde advies, dus buiten de gewone
+# wisseldrempel): demotie naar vast netladen alleen als het overschot het
+# geplande vermogen dit hele venster niet heeft kunnen dragen (piek-geheugen —
+# een wolkgat op het tick-moment is geen bewijs; 14:35-incident: demotie en
+# 23 s later alweer promotie).
+SURPLUS_DEMOTE_WINDOW_S = 300
+SURPLUS_DEMOTE_MARGIN_W = 300
 UPDATE_MINUTES = 10        # her-plan interval; realtime werk (bijspringen,
                            # EV-guard, discharge-guard) is event-gedreven en
                            # de veiligheid draait apart op WATCH_INTERVAL_S

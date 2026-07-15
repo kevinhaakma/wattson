@@ -34,6 +34,8 @@ from .const import (
     DISCHARGE_EXPORT_ABORT_HOLD_S,
     DISCHARGE_EXPORT_ABORT_W,
     SETPOINT_ACK_DEADBAND_W,
+    SURPLUS_DEMOTE_MARGIN_W,
+    SURPLUS_DEMOTE_WINDOW_S,
     TRACK_DEADBAND_W,
     TRACK_FAST_THROTTLE_S,
     TRACK_LOWER_GRACE_S,
@@ -52,11 +54,28 @@ class TrackController:
         self.tracked_outlim = 0.0     # laatst door de volglus geschreven outputlimiet
         self._fast_last = 0.0
         self._vraag_hist: list[tuple[float, float]] = []  # (t, vraag) voor terugneem-grace
+        self._chg_hist: list[tuple[float, float]] = []    # (t, laadvermogen) in overschotmodus
+
+    def surplus_carried(self, setpoint_w: float) -> bool:
+        """Heeft het zonoverschot het geplande laadvermogen recent (piek)
+        kunnen dragen? Peak-memory over SURPLUS_DEMOTE_WINDOW_S: een wolkgat
+        op het tick-moment is geen bewijs dat het overschot weg is — demotie
+        naar vast netladen pas als het hele venster onder het plan bleef."""
+        now_m = time.monotonic()
+        recent = [v for t, v in self._chg_hist
+                  if now_m - t <= SURPLUS_DEMOTE_WINDOW_S]
+        if not recent:
+            return False
+        return max(recent) >= setpoint_w - SURPLUS_DEMOTE_MARGIN_W
 
     def note_applied(self, action: str, applied: float) -> None:
         if action == "ontladen" and self.c.caps.p1_matching:
             # referentie voor de volglus: dit is wat de adapter als limiet schreef
             self.tracked_outlim = applied
+        if action == "laden_overschot" and not self._chg_hist:
+            # vers gepromoveerd: gun de overschotmodus één demotie-venster
+            # voordat een tick-moment-wolkgat hem alweer terugzet
+            self._chg_hist.append((time.monotonic(), applied))
 
     # ---------- setpoint-feedback ----------
     def discharge_feedback(self) -> float | None:
@@ -168,6 +187,18 @@ class TrackController:
         if not c.control_enabled or c.safety.tripped or c.ev.charging():
             return
         act = c._last_action
+        if act == "laden_overschot":
+            # peak-memory voor de demotie-beslissing van de plan-tick: alleen
+            # als het overschot het geplande vermogen dit hele venster niet
+            # droeg, mag vast netladen het overnemen (anti-flapping)
+            chg = c.t.fresh_power_w(c.bat_flow_entities()[0])
+            if chg is not None:
+                now_m = time.monotonic()
+                self._chg_hist.append((now_m, chg))
+                self._chg_hist = [(t, v) for t, v in self._chg_hist
+                                  if now_m - t <= SURPLUS_DEMOTE_WINDOW_S]
+        elif act != "laden" and self._chg_hist:
+            self._chg_hist = []
         if act == "ontladen":
             vraag = self.discharge_target()
             if vraag is None:

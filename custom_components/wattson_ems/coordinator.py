@@ -619,10 +619,16 @@ class WattsonCoordinator:
             # is er nú meer PV-overschot dan het geplande laadvermogen, gebruik
             # dan native surplus-matching: die pakt het hele overschot (gratis,
             # volgt wolken vanzelf) i.p.v. een vast setpoint dat de rest laat
-            # wegexporteren. Zakt het overschot onder het plan, dan schakelt de
-            # volgende tick terug naar vast (net-)laden tegen de dalprijs.
+            # wegexporteren. Demotie terug naar vast (net-)laden alleen op
+            # aangehouden bewijs: het gemeten laadvermogen moet het plan een
+            # heel venster niet gedragen hebben (track.surplus_carried) — een
+            # wolkgat precies op het tick-moment flipte anders elke tick de
+            # modus heen en weer (14:35-incident: demotie + 23 s later promotie).
             surplus_w = max(steps[0].pv_w - steps[0].load_w, 0.0)
-            if self.caps.surplus_mode and surplus_w >= abs(self.setpoint_w):
+            blijf_overschot = (self._last_action == "laden_overschot"
+                               and self.track.surplus_carried(abs(self.setpoint_w)))
+            if self.caps.surplus_mode and (
+                    surplus_w >= abs(self.setpoint_w) or blijf_overschot):
                 await self.set_battery("laden_overschot", abs(self.setpoint_w))
             else:
                 await self.set_battery("laden", abs(self.setpoint_w))
