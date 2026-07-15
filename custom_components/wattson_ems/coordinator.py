@@ -548,7 +548,10 @@ class WattsonCoordinator:
         # Het voordeel wordt exact bepaald met een extra DP-run waarin het
         # eerste uur wordt vastgezet op de huidige stand; zo stopt het
         # pendelen rond break-even zonder echte marge weg te geven.
-        stickable = ("rust", "laden", "ontladen")
+        # verkopen hoort er sinds v3 bij: zonder drempel is het een gewone
+        # DP-uitkomst en pendelde hij vrij tussen verkopen/laden/rust bij
+        # bijna-gelijke waardes (2026-07-15 20:00-20:32: 4 wissels in 32 min)
+        stickable = ("rust", "laden", "ontladen", "verkopen")
         if (prev_advies in stickable and self.advies in stickable
                 and self.advies != prev_advies and not ev_now and len(steps) > 1):
             forced = 0.0 if prev_advies == "rust" else prev_setpoint
