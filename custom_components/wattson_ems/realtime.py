@@ -313,6 +313,20 @@ class ExportRecovery:
         if not active:
             self.since = None
             return
+        # v3: export tijdens ontladen is geen fout op zich — verkopen mag als
+        # het loont. Alleen ingrijpen als exporteren de λ-regel NIET haalt
+        # (dan lekt bewaarwaarde het net op); haalt hij hem wel, dan is dit
+        # gewoon winstgevende teruglevering en regelt de volglus het vermogen.
+        if c.sell_enabled:
+            soc_pct = c.t.f(c.ent_soc)
+            prijs = c.t.current_price()
+            if soc_pct is not None and prijs is not None:
+                soc = soc_pct / 100.0 * c.params.capacity_kwh
+                exportprijs = c.scenario.export_price(prijs, dt_util.now().date())
+                if (exportprijs - c.params.beta
+                        > c.values.discharge_floor(soc) + ASSIST_MARGIN_EUR):
+                    self.since = None
+                    return
         p1 = c.t.fresh_power_w(c.ent_p1, 60)
         if p1 is None:
             self.since = None

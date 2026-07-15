@@ -65,22 +65,22 @@ class WattsonTreeCard extends HTMLElement {
 
   static get LEVELS() {
     return [
-      { key: "sturing", label: "sturing", opts: [
+      { key: "sturing", label: "sturing", icon: "mdi:power", opts: [
         { id: "actief", t: "actief" }, { id: "schaduw", t: "schaduw" }] },
-      { key: "gates", label: "veiligheid", gates: true, opts: [
+      { key: "gates", label: "veiligheid", icon: "mdi:shield-half-full", gates: true, opts: [
         { id: "data", t: "data" }, { id: "watchdog", t: "watchdog" },
         { id: "stale", t: "telemetrie" }, { id: "ev", t: "EV" }] },
-      { key: "aggro", label: "doelfunctie", opts: [
+      { key: "aggro", label: "doelfunctie", icon: "mdi:target", opts: [
         { id: "rustig", t: "rustig" }, { id: "gebalanceerd", t: "gebalanceerd" },
         { id: "agressief", t: "agressief" }] },
-      { key: "plan", label: "plan — wat doet dit uur", opts: [
+      { key: "plan", label: "plan — wat doet dit uur", icon: "mdi:chart-timeline-variant", opts: [
         { id: "laden_net", t: "laden net" }, { id: "laden_zon", t: "laden zon" },
         { id: "rust", t: "rust" }, { id: "ontladen", t: "ontladen" },
         { id: "verkopen", t: "verkopen" }] },
-      { key: "rt", label: "realtime", opts: [
+      { key: "rt", label: "realtime", icon: "mdi:flash-auto", opts: [
         { id: "assist_laden", t: "bijspringen laden" }, { id: "volgt", t: "volgt plan" },
         { id: "assist_ontladen", t: "bijspringen ontladen" }] },
-      { key: "device", label: "apparaat", opts: [
+      { key: "device", label: "apparaat", icon: "mdi:battery-charging-outline", opts: [
         { id: "off", t: "off" }, { id: "manual", t: "manual" },
         { id: "smart_charging", t: "smart charge" },
         { id: "smart_discharging", t: "smart discharge" }] },
@@ -92,7 +92,7 @@ class WattsonTreeCard extends HTMLElement {
     const root = this.attachShadow({ mode: "open" });
     const lvl = (L) => `
       <div class="lvl" data-lvl="${L.key}">
-        <span class="lt">${L.label}</span>
+        <span class="lt"><ha-icon icon="${L.icon}"></ha-icon>${L.label}</span>
         <div class="opts${L.gates ? " gates" : ""}">
           ${L.opts.map(o => `<span class="opt" data-opt="${o.id}">${o.t}</span>`).join("")}
         </div>
@@ -169,8 +169,10 @@ class WattsonTreeCard extends HTMLElement {
         .tree { position:relative; }
         svg.wires { position:absolute; inset:0; width:100%; height:100%; pointer-events:none; }
         .lvl { position:relative; padding:10px 0; }
-        .lt { display:block; font-size:9.5px; font-weight:600; letter-spacing:.14em;
-              text-transform:uppercase; color:rgba(255,255,255,.30); margin:0 0 6px; }
+        .lt { display:flex; align-items:center; gap:6px; font-size:9.5px; font-weight:600;
+              letter-spacing:.14em; text-transform:uppercase; color:rgba(255,255,255,.30);
+              margin:0 0 6px; }
+        .lt ha-icon { --mdc-icon-size:12px; color:rgba(167,173,162,.5); }
         .opts { display:flex; gap:6px; flex-wrap:wrap; position:relative; }
         .opt {
           font-size:11px; color:rgba(255,255,255,.38);
@@ -275,10 +277,22 @@ class WattsonTreeCard extends HTMLElement {
     } else if (sub) sub.remove();
   }
 
+  static _countdown(hhmm) {
+    const m = /^(\d\d):(\d\d)$/.exec(hhmm || "");
+    if (!m) return "";
+    const now = new Date();
+    const doel = new Date(now);
+    doel.setHours(+m[1], +m[2], 0, 0);
+    if (doel <= now) doel.setDate(doel.getDate() + 1);
+    const min = Math.round((doel - now) / 60000);
+    if (min <= 0 || min > 12 * 60) return "";
+    return min >= 90 ? ` (over ${Math.round(min / 60 * 10) / 10} uur)` : ` (over ${min} min)`;
+  }
+
   _thought(advies, a, b, fout) {
     const C = WattsonTreeCard;
     const piek = (a.volgende_actie || "").match(/om (\d\d:\d\d)/);
-    const t = piek ? piek[1] : "vanavond";
+    const t = piek ? piek[1] + C._countdown(piek[1]) : "vanavond";
     if (fout) return `<span class="red">Er is ingegrepen:</span> ${fout}`;
     if (advies === "geen data") return "Wattson wacht op verse metingen…";
     if (advies === "rust (EV-guard)" || advies === "rust (EV-check)")
@@ -474,8 +488,31 @@ class WattsonTreeCard extends HTMLElement {
       if (Math.abs(py - y) < 2) d += ` L ${x} ${y}`;
       else d += ` C ${px} ${py + (y - py) * 0.55}, ${x} ${y - (y - py) * 0.55}, ${x} ${y}`;
     }
+    // skelet: waaier van elk actief punt naar ÁLLE opties van het volgende
+    // niveau — zo lees je dat het keuzes waren, niet vaste stappen
+    let skel = "";
+    if (!stopAt) {
+      const bez = (a, z) =>
+        `M ${a[0]} ${a[1]} C ${a[0]} ${a[1] + (z[1] - a[1]) * 0.55}, `
+        + `${z[0]} ${z[1] - (z[1] - a[1]) * 0.55}, ${z[0]} ${z[1]}`;
+      const fans = [
+        [this._opt("aggro", P.aggroId), "plan"],
+        [this._opt("plan", P.planId), "rt"],
+        [this._opt("rt", P.rtId), "device"],
+      ];
+      const lastGate = gateEls[gateEls.length - 1];
+      if (lastGate) fans.unshift([lastGate, "aggro"]);
+      for (const [fromEl, toLvl] of fans) {
+        if (!fromEl) continue;
+        const from = pt(fromEl, "bottom");
+        for (const o of this._qa(`.lvl[data-lvl="${toLvl}"] .opt`)) {
+          skel += `<path d="${bez(from, pt(o, "top"))}" fill="none" `
+            + `stroke="rgba(226,224,212,.08)" stroke-width="1"/>`;
+        }
+      }
+    }
     const end = stops[stops.length - 1] || [0, 0];
-    svg.innerHTML = `
+    svg.innerHTML = skel + `
       <path class="glowline" d="${d}" fill="none" stroke="${color}" stroke-width="5" stroke-linecap="round"/>
       <path d="${d}" fill="none" stroke="${color}" stroke-width="1.4" stroke-linecap="round" opacity=".55"/>
       <path class="flowline" d="${d}" fill="none" stroke="${color}" stroke-width="2.6" stroke-linecap="round"/>
