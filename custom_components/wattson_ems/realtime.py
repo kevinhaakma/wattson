@@ -110,11 +110,28 @@ class TrackController:
         adapters remt de discharge-guard direct.
         """
         c = self.c
-        vraag = self.discharge_target()
-        if vraag is None:
-            return
         now = time.monotonic()
         if now - self._fast_last < TRACK_FAST_THROTTLE_S:
+            return
+        # surplus-promotie ook event-gedreven: groeit het bronoverschot tijdens
+        # vast (dal-)laden voorbij het setpoint, dan zou het verschil tot de
+        # trage lus (30 s) het net op lekken — direct naar surplus-matching
+        if (c._last_action == "laden" and c.caps.surplus_mode
+                and c.control_enabled and not c.safety.tripped
+                and not c.ev.charging()):
+            p1 = c.t.fresh_power_w(c.ent_p1, 90)
+            if p1 is not None:
+                ent_chg, _ = c.bat_flow_entities()
+                chg = c.t.fresh_power_w(ent_chg)
+                chg_now = chg if chg is not None else c._last_charge_w
+                bron_export = -A.p1_without_battery(p1, charge_w=chg_now)
+                if bron_export > c._last_charge_w + 300:
+                    self._fast_last = now
+                    c.hass.async_create_task(c.set_battery(
+                        "laden_overschot", max(c._last_charge_w, 0.0)))
+            return
+        vraag = self.discharge_target()
+        if vraag is None:
             return
         if c.caps.p1_matching:
             doel = min(max(vraag + TRACK_MARGE_W, c.caps.min_setpoint_w),

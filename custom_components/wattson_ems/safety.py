@@ -104,6 +104,14 @@ class Safety:
                 c.hass.bus.async_fire("logbook_entry", {
                     "name": "Wattson", "message": "WATCHDOG opgeheven, sturing hervat",
                     "entity_id": "sensor.wattson_advies", "domain": "wattson_ems"})
+                # direct herplannen: tijdens de trip weigerde de adapter elk
+                # commando, dus het staande advies is nooit uitgevoerd. Zonder
+                # her-tick blijft de sturing tot de volgende plan-tick (10 min)
+                # dood staan (incident 2026-07-15: 2× na HA-herstart — apparaat
+                # liep nog op het pre-restart-commando, watchdog tripte op
+                # "laadt terwijl 'geen data'", opheffing volgde maar niets
+                # voerde het plan alsnog uit).
+                c.hass.async_create_task(c._tick(None))
 
     async def stale_guard(self) -> None:
         """Telemetrie stil met sturing aan: na GEENDATA_STOP_S veilig stoppen

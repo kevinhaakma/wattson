@@ -259,6 +259,12 @@ class WattsonCoordinator:
         # snelle volglus: stuurwaarden bijregelen op de gemeten vraag
         self.listeners.append(async_track_time_interval(
             self.hass, self.track.tick, timedelta(seconds=TRACK_INTERVAL_S)))
+        # uurgrens-replan: prijzen wisselen op de klok, het 10-min-raster niet.
+        # Zodra de prijssensor een nieuwe waarde meldt direct herplannen, zodat
+        # een piekontlading om 20:00 start en niet pas op de eerstvolgende tick.
+        if self.ent_price:
+            self.listeners.append(async_track_state_change_event(
+                self.hass, [self.ent_price], self._price_changed))
         ev_entities = self.ev.entities()
         if ev_entities:
             self.listeners.append(async_track_state_change_event(
@@ -300,6 +306,14 @@ class WattsonCoordinator:
                 await self.set_battery("rust", 0.0)
             except Exception:  # noqa: BLE001 - unload mag nooit blokkeren
                 _LOGGER.exception("Wattson: accu naar rust bij unload faalde")
+
+    @callback
+    def _price_changed(self, event) -> None:
+        old = event.data.get("old_state")
+        new = event.data.get("new_state")
+        if old is None or new is None or old.state == new.state:
+            return  # attribuut-updates en herhalingen zijn geen nieuw uur
+        self.hass.async_create_task(self._tick(None))
 
     @callback
     def _ev_guard(self, event) -> None:

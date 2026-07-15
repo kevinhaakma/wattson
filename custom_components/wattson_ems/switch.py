@@ -36,6 +36,11 @@ class WattsonControlSwitch(SwitchEntity, RestoreEntity):
         last = await self.async_get_last_state()
         self.coordinator.control_enabled = bool(last and last.state == "on")
         self._attr_is_on = self.coordinator.control_enabled
+        if self.coordinator.control_enabled:
+            # opstart-race dicht: de eerste plan-tick kan vóór deze restore
+            # gedraaid hebben en dan draait Wattson tot de volgende tick
+            # (10 min) ongewild in schaduwmodus — direct opnieuw plannen
+            self.hass.async_create_task(self.coordinator._tick(None))
 
     async def async_turn_on(self, **kwargs):
         self.coordinator.control_enabled = True
@@ -93,8 +98,8 @@ class WattsonAssistSwitch(SwitchEntity, RestoreEntity):
 
 
 class WattsonSellSwitch(SwitchEntity, RestoreEntity):
-    """Verkopen: boven de drempelprijs mag de planner ontladen vóórbij de
-    huisvraag (= exporteren). Standaard uit; de drempel staat in de opties."""
+    """Verkopen: met deze switch aan mag de planner ontladen vóórbij de
+    huisvraag (= exporteren); óf dat loont beslist de DP per uur zelf."""
 
     _attr_name = "Wattson verkopen"
     _attr_unique_id = "wattson_verkopen"

@@ -120,8 +120,9 @@ ASSIST_EXPORT_W = 300      # export waarboven overschot-assist mag starten
 ASSIST_STOP_W = 40         # pas stoppen als bronvraag/overschot vrijwel nul is
 ASSIST_MARGIN_EUR = 0.005  # hysterese op de λ-vergelijking: prijs moet dit
                            # boven de vloer / onder het plafond liggen
-ASSIST_THROTTLE_S = 15     # minimale tijd tussen assist-beslissingen (P1 komt
-                           # elke ~10 s binnen; 15 s is de natuurlijke vloer)
+ASSIST_THROTTLE_S = 10     # minimale tijd tussen assist-beslissingen — gelijk
+                           # aan de P1-updatecadans (~10 s); sneller beslissen
+                           # dan er nieuwe metingen zijn heeft geen zin
 ASSIST_SOC_MARGE_KWH = 0.15
 ASSIST_MAX_SOC_MARGIN_KWH = 0.05  # laad-assist stopt voor de absolute bovengrens
 ASSIST_POWER_DEADBAND_W = 50      # voorkom setpoint-calls voor meetruis
