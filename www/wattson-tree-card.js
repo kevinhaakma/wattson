@@ -1,14 +1,17 @@
 /**
- * wattson-tree-card — de complete state tree van Wattson v3, live.
+ * wattson-tree-card — de complete beslisboom van Wattson v3 als échte tree.
  *
- * Toont de hele beslisketen als boom met het actieve pad opgelicht:
- * Veiligheid -> Doelfunctie -> Plan (DP + λ) -> Realtime -> Apparaat.
- * Elke node draagt zijn actuele waarde; de λ-regel (bewaarwaarde vs
- * ontlaadvloer/laadplafond) staat expliciet naast de actuele prijs.
+ * Elk niveau toont ÁLLE opties (ook de takken die nu niet gekozen zijn); een
+ * getekende draad volgt het actieve pad van boven naar beneden:
+ *
+ *   sturing -> veiligheid (4 gates) -> doelfunctie -> plan-tak (5 opties)
+ *           -> realtime-override -> apparaatmodus
+ *
+ * Onderin staat de λ-regel die de plan-tak bepaalt (bewaarwaarde, vloer,
+ * plafond, actuele prijs) plus de reden-tekst en de apparaat-strip.
  *
  * type: custom:wattson-tree-card         # alle entities hebben defaults
- * Stijl: overzicht "glass" (zelfde tokens als wattson-brain-card), geen
- * emojis, build-once/patch.
+ * Stijl: overzicht "glass", geen emojis, build-once/patch.
  */
 class WattsonTreeCard extends HTMLElement {
   setConfig(config) {
@@ -29,7 +32,7 @@ class WattsonTreeCard extends HTMLElement {
     this._built = false;
   }
 
-  getCardSize() { return 8; }
+  getCardSize() { return 9; }
   static getStubConfig() { return {}; }
 
   set hass(hass) {
@@ -37,6 +40,14 @@ class WattsonTreeCard extends HTMLElement {
     if (!this._built) this._build();
     this._update();
   }
+
+  connectedCallback() {
+    if (!this._ro && "ResizeObserver" in window) {
+      this._ro = new ResizeObserver(() => this._wire());
+      this._ro.observe(this);
+    }
+  }
+  disconnectedCallback() { if (this._ro) { this._ro.disconnect(); this._ro = null; } }
 
   _st(id) { return this._hass && this._hass.states[id]; }
   _num(id) {
@@ -50,14 +61,39 @@ class WattsonTreeCard extends HTMLElement {
   }
   static _eur(v) { return v === null || v === undefined ? "–" : "€ " + WattsonTreeCard._nl(v, 3); }
 
+  static get LEVELS() {
+    return [
+      { key: "sturing", label: "sturing", opts: [
+        { id: "actief", t: "actief" }, { id: "schaduw", t: "schaduw" }] },
+      { key: "gates", label: "veiligheid", gates: true, opts: [
+        { id: "data", t: "data" }, { id: "watchdog", t: "watchdog" },
+        { id: "stale", t: "telemetrie" }, { id: "ev", t: "EV" }] },
+      { key: "aggro", label: "doelfunctie", opts: [
+        { id: "rustig", t: "rustig" }, { id: "gebalanceerd", t: "gebalanceerd" },
+        { id: "agressief", t: "agressief" }] },
+      { key: "plan", label: "plan (DP · λ-regel)", opts: [
+        { id: "laden_net", t: "laden net" }, { id: "laden_zon", t: "laden zon" },
+        { id: "rust", t: "rust" }, { id: "ontladen", t: "ontladen" },
+        { id: "verkopen", t: "verkopen" }] },
+      { key: "rt", label: "realtime", opts: [
+        { id: "assist_laden", t: "bijspringen laden" }, { id: "volgt", t: "volgt plan" },
+        { id: "assist_ontladen", t: "bijspringen ontladen" }] },
+      { key: "device", label: "apparaat", opts: [
+        { id: "off", t: "off" }, { id: "manual", t: "manual" },
+        { id: "smart_charging", t: "smart charge" },
+        { id: "smart_discharging", t: "smart discharge" }] },
+    ];
+  }
+
   _build() {
     this._built = true;
     const root = this.attachShadow({ mode: "open" });
-    const node = (id, label) => `
-      <div class="node" id="${id}">
-        <span class="nl">${label}</span>
-        <span class="nv" data-el="v">–</span>
-        <span class="nx" data-el="x"></span>
+    const lvl = (L) => `
+      <div class="lvl" data-lvl="${L.key}">
+        <span class="lt">${L.label}</span>
+        <div class="opts${L.gates ? " gates" : ""}">
+          ${L.opts.map(o => `<span class="opt" data-opt="${o.id}">${o.t}</span>`).join("")}
+        </div>
       </div>`;
     root.innerHTML = `
       <style>
@@ -73,7 +109,7 @@ class WattsonTreeCard extends HTMLElement {
           padding: 16px;
           font: 400 13px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
         }
-        .head { display:flex; align-items:center; gap:8px; margin-bottom:12px; }
+        .head { display:flex; align-items:center; gap:8px; margin-bottom:14px; }
         .head ha-icon { --mdc-icon-size:17px; color:#a7ada2; }
         .head .t { font-size:12px; font-weight:600; letter-spacing:.12em;
                    text-transform:uppercase; color:rgba(255,255,255,.56); flex:1; }
@@ -87,108 +123,100 @@ class WattsonTreeCard extends HTMLElement {
         .state-chip.ontladen{ color:#4cc88a; border-color:rgba(76,200,138,.4);  background:rgba(76,200,138,.10); }
         .state-chip.fout    { color:#ff6b81; border-color:rgba(255,107,129,.4); background:rgba(255,107,129,.10); }
 
-        .branch { margin-bottom:2px; }
-        .btitle {
-          display:flex; align-items:center; gap:7px;
-          font-size:10px; font-weight:600; letter-spacing:.14em; text-transform:uppercase;
-          color:rgba(255,255,255,.34); padding:7px 0 3px;
+        .tree { position:relative; }
+        svg.wires { position:absolute; inset:0; width:100%; height:100%; pointer-events:none; }
+        .lvl { position:relative; padding:11px 0 11px; }
+        .lvl + .lvl { margin-top:8px; }
+        .lt { display:block; font-size:9.5px; font-weight:600; letter-spacing:.14em;
+              text-transform:uppercase; color:rgba(255,255,255,.30); margin:0 0 6px; }
+        .opts { display:flex; gap:6px; flex-wrap:wrap; position:relative; }
+        .opt {
+          font-size:11px; color:rgba(255,255,255,.40);
+          background:rgba(255,255,255,.035); border:1px solid rgba(226,224,212,.07);
+          border-radius:9px; padding:3px 10px; white-space:nowrap; position:relative; z-index:1;
+          transition: all .25s ease;
         }
-        .btitle ha-icon { --mdc-icon-size:13px; color:rgba(167,173,162,.6); }
-        .branch.lit .btitle { color:rgba(255,255,255,.62); }
-        .branch.lit .btitle ha-icon { color:#a7ada2; }
-        .branch.alarm .btitle { color:#ff6b81; }
-        .branch.alarm .btitle ha-icon { color:#ff6b81; }
-        .nodes { border-left:1px solid rgba(226,224,212,.10); margin-left:6px; padding-left:0; }
-        .node {
-          display:grid; grid-template-columns:128px auto 1fr; gap:10px; align-items:baseline;
-          padding:2.5px 8px 2.5px 14px; border-radius:0 6px 6px 0; position:relative;
+        .opt.active {
+          color:rgba(255,255,255,.96); font-weight:600;
+          background:rgba(255,255,255,.09); border-color:rgba(226,224,212,.30);
+          box-shadow:0 0 0 1px rgba(255,255,255,.04), 0 2px 10px rgba(0,0,0,.25);
         }
-        .node::before {
-          content:""; position:absolute; left:0; top:50%; width:9px; height:1px;
-          background:rgba(226,224,212,.10);
+        .opt.active.tint-amber { color:#ffb86b; border-color:rgba(255,184,107,.5); background:rgba(255,184,107,.10); }
+        .opt.active.tint-green { color:#4cc88a; border-color:rgba(76,200,138,.5);  background:rgba(76,200,138,.10); }
+        .opt.active.tint-red   { color:#ff6b81; border-color:rgba(255,107,129,.5); background:rgba(255,107,129,.10); }
+        .opts.gates .opt.ok { color:rgba(76,200,138,.75); border-color:rgba(76,200,138,.22); background:rgba(76,200,138,.05); }
+        .opts.gates .opt.blocked { color:#ff6b81; font-weight:600; border-color:rgba(255,107,129,.5); background:rgba(255,107,129,.12); }
+        .sub { font-size:10.5px; color:rgba(255,255,255,.38); margin-top:5px;
+               overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+
+        .rule {
+          display:flex; gap:6px; flex-wrap:wrap; align-items:center;
+          background:rgba(255,255,255,.05); border:1px solid rgba(226,224,212,.13);
+          border-radius:7px; padding:8px 11px; margin:14px 0 10px; line-height:1.6;
         }
-        .node .nl { color:rgba(255,255,255,.42); font-size:11.5px; }
-        .node .nv { color:rgba(255,255,255,.94); font-weight:500; white-space:nowrap; }
-        .node .nx { color:rgba(255,255,255,.34); font-size:11px; overflow:hidden;
-                    text-overflow:ellipsis; white-space:nowrap; }
-        .node.on  { background:rgba(255,255,255,.05); }
-        .node.on .nv { color:#4cc88a; }
-        .node.warn .nv { color:#ffb86b; }
-        .node.bad  { background:rgba(255,107,129,.07); }
-        .node.bad .nv { color:#ff6b81; }
-        .node.dim .nv { color:rgba(255,255,255,.42); font-weight:400; }
-        .socbar { grid-column:3; height:4px; border-radius:2px; align-self:center;
-                  background:rgba(255,255,255,.08); overflow:hidden; }
-        .socbar i { display:block; height:100%; background:#4cc88a; border-radius:2px; }
+        .rule .rl { font-size:10px; font-weight:600; letter-spacing:.1em; text-transform:uppercase;
+                    color:rgba(255,255,255,.34); width:100%; }
+        .kv { font-size:11px; color:rgba(255,255,255,.56); background:rgba(255,255,255,.046);
+              border:1px solid rgba(226,224,212,.075); border-radius:9px; padding:2px 8px; white-space:nowrap; }
+        .kv b { color:rgba(255,255,255,.94); font-weight:500; }
+        .kv.hit b { color:#4cc88a; }
+        .reden { color:rgba(255,255,255,.62); font-size:12px; margin:0 0 12px; min-height:1.4em;
+                 overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+
+        .strip { display:flex; align-items:center; gap:12px; padding-top:10px;
+                 border-top:1px solid rgba(226,224,212,.075); }
+        .strip .kv { flex:none; }
+        .socwrap { flex:1; display:flex; align-items:center; gap:8px; }
+        .socbar { flex:1; height:4px; border-radius:2px; background:rgba(255,255,255,.08); overflow:hidden; }
+        .socbar i { display:block; height:100%; background:#4cc88a; border-radius:2px; transition:width .4s ease; }
+        .soctxt { font-size:11px; color:rgba(255,255,255,.56); white-space:nowrap; }
       </style>
       <ha-card>
         <div class="head">
           <ha-icon icon="mdi:file-tree-outline"></ha-icon>
-          <span class="t">Wattson — state tree</span>
+          <span class="t">Wattson — beslisboom</span>
           <span class="state-chip" id="chip">–</span>
         </div>
-
-        <div class="branch" id="b-veilig">
-          <div class="btitle"><ha-icon icon="mdi:shield-half-full"></ha-icon>Veiligheid</div>
-          <div class="nodes">
-            ${node("n-watchdog", "watchdog")}
-            ${node("n-stale", "telemetrie")}
-            ${node("n-ev", "EV-guard")}
-          </div>
+        <div class="tree" id="tree">
+          <svg class="wires" id="wires"></svg>
+          ${WattsonTreeCard.LEVELS.map(lvl).join("")}
         </div>
-
-        <div class="branch" id="b-doel">
-          <div class="btitle"><ha-icon icon="mdi:target"></ha-icon>Doelfunctie</div>
-          <div class="nodes">
-            ${node("n-aggro", "agressiviteit")}
-            ${node("n-scenario", "scenario")}
-            ${node("n-verkopen", "verkopen")}
-          </div>
+        <div class="rule">
+          <span class="rl">De λ-regel — wat een kWh in de accu nu waard is</span>
+          <span class="kv">bewaarwaarde λ <b id="r-lam">–</b></span>
+          <span class="kv" id="r-vloer-w">ontlaadvloer <b id="r-vloer">–</b></span>
+          <span class="kv" id="r-plaf-w">laadplafond <b id="r-plaf">–</b></span>
+          <span class="kv">prijs nu <b id="r-prijs">–</b></span>
+          <span class="kv">zelfvoorziening <b id="r-zelf">–</b></span>
         </div>
-
-        <div class="branch" id="b-plan">
-          <div class="btitle"><ha-icon icon="mdi:chart-timeline-variant"></ha-icon>Plan (DP)</div>
-          <div class="nodes">
-            ${node("n-advies", "advies")}
-            ${node("n-lambda", "bewaarwaarde λ")}
-            ${node("n-vloer", "ontlaadvloer")}
-            ${node("n-plafond", "laadplafond")}
-            ${node("n-volgende", "volgende actie")}
-            ${node("n-horizon", "horizon")}
-          </div>
-        </div>
-
-        <div class="branch" id="b-realtime">
-          <div class="btitle"><ha-icon icon="mdi:flash-auto"></ha-icon>Realtime</div>
-          <div class="nodes">
-            ${node("n-assist", "bijspringen")}
-            ${node("n-gestuurd", "laatst gestuurd")}
-          </div>
-        </div>
-
-        <div class="branch" id="b-app">
-          <div class="btitle"><ha-icon icon="mdi:battery-charging-outline"></ha-icon>Apparaat</div>
-          <div class="nodes">
-            ${node("n-mode", "modus")}
-            ${node("n-power", "vermogen")}
-            <div class="node" id="n-soc">
-              <span class="nl">voorraad</span>
-              <span class="nv" data-el="v">–</span>
-              <span class="socbar"><i data-el="bar" style="width:0%"></i></span>
-            </div>
+        <p class="reden" id="reden">–</p>
+        <div class="strip">
+          <span class="kv">accu <b id="s-power">–</b></span>
+          <span class="kv">net <b id="s-net">–</b></span>
+          <div class="socwrap">
+            <div class="socbar"><i id="s-bar" style="width:0%"></i></div>
+            <span class="soctxt" id="s-soc">–</span>
           </div>
         </div>
       </ha-card>`;
     this._el = (id) => root.getElementById(id);
+    this._q = (sel) => root.querySelector(sel);
+    this._qa = (sel) => [...root.querySelectorAll(sel)];
   }
 
-  _setNode(id, value, extra, cls) {
-    const n = this._el(id);
-    if (!n) return;
-    n.className = "node" + (cls ? " " + cls : "");
-    n.querySelector('[data-el="v"]').textContent = value;
-    const x = n.querySelector('[data-el="x"]');
-    if (x) x.textContent = extra || "";
+  _opt(lvl, id) { return this._q(`.lvl[data-lvl="${lvl}"] .opt[data-opt="${id}"]`); }
+
+  _setLevel(lvl, activeId, tint, subText) {
+    const box = this._q(`.lvl[data-lvl="${lvl}"]`);
+    this._qa(`.lvl[data-lvl="${lvl}"] .opt`).forEach(o => {
+      o.className = "opt" + (o.dataset.opt === activeId
+        ? " active" + (tint ? " tint-" + tint : "") : "");
+    });
+    let sub = box.querySelector(".sub");
+    if (subText) {
+      if (!sub) { sub = document.createElement("div"); sub.className = "sub"; box.appendChild(sub); }
+      sub.textContent = subText;
+    } else if (sub) sub.remove();
   }
 
   _update() {
@@ -200,6 +228,7 @@ class WattsonTreeCard extends HTMLElement {
     const b = a.berekend_met || {};
     const advies = adv.state;
     const fout = a.fout;
+    const gestuurd = a.laatst_gestuurd || "";
 
     // kop-chip
     const chip = this._el("chip");
@@ -208,86 +237,154 @@ class WattsonTreeCard extends HTMLElement {
       : /laden/.test(advies) && !/ontladen/.test(advies) ? "laden"
       : /ontladen|verkopen/.test(advies) ? "ontladen" : "");
 
-    // veiligheid
-    const watchErr = typeof fout === "string" && fout.startsWith("WATCHDOG");
-    this._setNode("n-watchdog", watchErr ? "TRIP" : "ok",
-      watchErr ? fout : "", watchErr ? "bad" : "on");
-    this._setNode("n-stale", a.watchdog_telemetrie || "–",
-      fout && !watchErr ? fout : "",
-      fout && !watchErr ? "bad" : a.watchdog_telemetrie === "actief" ? "on" : "dim");
-    const evGuard = advies === "rust (EV-guard)" || advies === "rust (EV-check)";
-    this._setNode("n-ev", b.ev_laadt ? "auto laadt" : "vrij",
-      evGuard ? "accu geblokkeerd voor de auto" : "",
-      b.ev_laadt ? "warn" : "dim");
-    this._el("b-veilig").className = "branch" + (watchErr || fout ? " alarm" : "");
+    // niveau 1: sturing
+    const actief = !!a.sturing_actief;
+    this._setLevel("sturing", actief ? "actief" : "schaduw",
+      actief ? "green" : "amber", actief ? null : "Wattson adviseert alleen — stuurt niet");
 
-    // doelfunctie
+    // niveau 2: veiligheid-gates (allemaal zichtbaar, rood = pad stopt hier)
+    const watchTrip = typeof fout === "string" && fout.startsWith("WATCHDOG");
+    const staleErr = typeof fout === "string" && !watchTrip && /telemetrie|stil/i.test(fout);
+    const geenData = advies === "geen data";
+    const evBlock = advies === "rust (EV-guard)" || advies === "rust (EV-check)";
+    const gates = { data: !geenData, watchdog: !watchTrip, stale: !staleErr, ev: !evBlock };
+    let blockedGate = null;
+    this._qa('.lvl[data-lvl="gates"] .opt').forEach(o => {
+      const ok = gates[o.dataset.opt];
+      o.className = "opt " + (ok ? "ok" : "blocked");
+      if (!ok && !blockedGate) blockedGate = o.dataset.opt;
+    });
+    const gateBox = this._q('.lvl[data-lvl="gates"]');
+    let gsub = gateBox.querySelector(".sub");
+    const gateTxt = watchTrip ? fout
+      : evBlock ? (b.ev_laadt ? "auto laadt — accu geblokkeerd voor de auto" : a.reden)
+      : staleErr ? fout : null;
+    if (gateTxt) {
+      if (!gsub) { gsub = document.createElement("div"); gsub.className = "sub"; gateBox.appendChild(gsub); }
+      gsub.textContent = gateTxt;
+    } else if (gsub) gsub.remove();
+
+    // niveau 3: doelfunctie (agressiviteit = de knop op alpha/beta/slijtage)
     const aggro = this._st(this._config.agressiviteit);
-    const pref = b.voorkeur_zelfvoorziening_eur_kwh;
-    this._setNode("n-aggro", aggro ? aggro.state : (a.agressiviteit || "–"),
-      pref !== undefined ? `zelfvoorziening weegt ${C._eur(pref)}/kWh mee` : "", "");
-    this._setNode("n-scenario", b.scenario || "–",
-      a.scenario_waarschuwing || (b.scenario === "saldering" ? "export = volle uurprijs" : ""),
-      b.scenario_waarschuwing ? "warn" : "dim");
+    const aggroId = (aggro && aggro.state) || a.agressiviteit || "gebalanceerd";
     const sell = this._st(this._config.sw_sell);
-    this._setNode("n-verkopen", sell && sell.state === "on" ? "gewapend" : "uit",
-      sell && sell.state === "on" ? "DP beslist per uur of exporteren loont" : "",
-      sell && sell.state === "on" ? "on" : "dim");
+    const sellOn = sell && sell.state === "on";
+    const pref = b.voorkeur_zelfvoorziening_eur_kwh;
+    this._setLevel("aggro", aggroId, null,
+      `zelfvoorziening weegt ${C._eur(pref)}/kWh mee · scenario ${b.scenario || "–"}`
+      + ` · verkopen ${sellOn ? "gewapend" : "uit"}`);
 
-    // plan
+    // niveau 4: plan-tak (5 opties; welke koos de DP dit uur)
+    let planId = "rust", planTint = null;
+    if (advies === "laden" || advies === "bijspringen: laden") {
+      planId = /smart_charging/.test(gestuurd) ? "laden_zon" : "laden_net";
+      planTint = "amber";
+    } else if (advies === "ontladen" || advies === "bijspringen: ontladen") {
+      planId = "ontladen"; planTint = "green";
+    } else if (advies === "verkopen") {
+      planId = "verkopen"; planTint = "green";
+    }
     const sp = a.setpoint_w;
-    this._setNode("n-advies",
-      advies + (sp ? ` ${sp > 0 ? "+" : ""}${C._nl(sp)} W` : ""),
-      a.reden || "", /laden|ontladen|verkopen/.test(advies) ? "on" : "");
-    const lam = b.marginale_waarde_eur_kwh;
-    const prijs = b.prijs_nu;
-    this._setNode("n-lambda", C._eur(lam),
-      b.soc_pct !== undefined ? `per kWh in de accu bij ${C._nl(b.soc_pct)}% SoC` : "");
-    const vloer = b.ontlaadvloer_eur_kwh;
-    const boven = prijs !== undefined && vloer !== undefined && prijs > vloer;
-    this._setNode("n-vloer", C._eur(vloer),
-      prijs !== undefined ? `prijs nu ${C._eur(prijs)} → ${boven ? "ontladen loont" : "bewaren"}` : "",
-      boven ? "on" : "dim");
-    const plafond = b.laadplafond_eur_kwh;
-    const onder = prijs !== undefined && plafond !== undefined && prijs < plafond;
-    this._setNode("n-plafond", C._eur(plafond),
-      prijs !== undefined ? `prijs nu ${C._eur(prijs)} → ${onder ? "laden loont" : "niet netladen"}` : "",
-      onder ? "on" : "dim");
-    this._setNode("n-volgende", a.volgende_actie || "–", "", a.volgende_actie ? "" : "dim");
-    this._setNode("n-horizon",
-      b.zelfvoorziening_horizon_pct !== undefined ? C._nl(b.zelfvoorziening_horizon_pct) + "% eigen" : "–",
-      `vraag ${C._nl(b.verwachte_vraag_horizon_kwh, 1)} kWh · restant ${C._nl(b.verwacht_restant_einde_kwh, 2)} kWh · ${b.horizon_uren || "–"} u`);
+    this._setLevel("plan", planId, planTint,
+      (sp ? `setpoint ${sp > 0 ? "+" : ""}${C._nl(sp)} W · ` : "") + (a.volgende_actie || ""));
 
-    // realtime
-    const assistActive = /^bijspringen/.test(advies);
-    this._setNode("n-assist", assistActive ? advies.replace("bijspringen: ", "actief: ") : (a.bijspringen || "–"),
-      assistActive ? a.reden : "", assistActive ? "on" : "dim");
-    const sturing = a.sturing_actief;
-    this._setNode("n-gestuurd", a.laatst_gestuurd || "–",
-      sturing ? "" : "schaduwmodus — Wattson stuurt niet",
-      sturing ? "" : "warn");
-    this._el("b-realtime").className = "branch" + (assistActive ? " lit" : "");
-    this._el("b-plan").className = "branch" + (assistActive ? "" : " lit");
+    // niveau 5: realtime-override
+    const rtId = advies === "bijspringen: laden" ? "assist_laden"
+      : advies === "bijspringen: ontladen" ? "assist_ontladen" : "volgt";
+    this._setLevel("rt", rtId, rtId === "volgt" ? null : planTint,
+      rtId === "volgt" ? `bijspringen ${a.bijspringen || "uit"}` : a.reden);
 
-    // apparaat
+    // niveau 6: apparaat
     const mode = this._st(this._config.mode);
+    const modeId = mode && ["off", "manual", "smart_charging", "smart_discharging"].includes(mode.state)
+      ? mode.state : "off";
     const ac = this._st(this._config.acmode);
-    this._setNode("n-mode", mode ? mode.state : "–", ac ? `ac ${ac.state}` : "",
-      mode && mode.state !== "off" ? "on" : "dim");
     const chg = this._num(this._config.chg_w);
     const dis = this._num(this._config.dis_w);
-    const p1 = this._num(this._config.p1);
-    const actief = (chg || 0) > 50 ? `laadt ${C._nl(chg)} W`
+    const devTint = (chg || 0) > 50 ? "amber" : (dis || 0) > 50 ? "green" : null;
+    this._setLevel("device", modeId, devTint,
+      `ac ${ac ? ac.state : "–"} · gestuurd: ${gestuurd || "–"}`);
+
+    // λ-regel
+    const prijs = b.prijs_nu, lam = b.marginale_waarde_eur_kwh;
+    const vloer = b.ontlaadvloer_eur_kwh, plaf = b.laadplafond_eur_kwh;
+    this._el("r-lam").textContent = C._eur(lam);
+    this._el("r-vloer").textContent = C._eur(vloer);
+    this._el("r-plaf").textContent = C._eur(plaf);
+    this._el("r-prijs").textContent = C._eur(prijs);
+    this._el("r-zelf").textContent = b.zelfvoorziening_horizon_pct !== undefined
+      ? C._nl(b.zelfvoorziening_horizon_pct) + "%" : "–";
+    this._el("r-vloer-w").className = "kv" + (prijs > vloer ? " hit" : "");
+    this._el("r-plaf-w").className = "kv" + (prijs < plaf ? " hit" : "");
+    this._el("reden").textContent = a.reden || "–";
+
+    // apparaat-strip
+    this._el("s-power").textContent = (chg || 0) > 50 ? `laadt ${C._nl(chg)} W`
       : (dis || 0) > 50 ? `ontlaadt ${C._nl(dis)} W` : "stil";
-    this._setNode("n-power", actief,
-      p1 !== null ? `net ${p1 >= 0 ? "import" : "export"} ${C._nl(Math.abs(p1))} W` : "",
-      (chg || 0) > 50 ? "warn" : (dis || 0) > 50 ? "on" : "dim");
+    const p1 = this._num(this._config.p1);
+    this._el("s-net").textContent = p1 === null ? "–"
+      : `${p1 >= 0 ? "import" : "export"} ${C._nl(Math.abs(p1))} W`;
     const socP = this._num(this._config.soc);
-    const socN = this._el("n-soc");
-    socN.querySelector('[data-el="v"]').textContent =
-      socP === null ? "–" : `${C._nl(socP)}% · ${C._nl(b.soc_kwh, 2)} kWh`;
-    socN.querySelector('[data-el="bar"]').style.width = `${socP || 0}%`;
-    this._el("b-app").className = "branch" + (mode && mode.state !== "off" ? " lit" : "");
+    this._el("s-bar").style.width = `${socP || 0}%`;
+    this._el("s-soc").textContent = socP === null ? "–"
+      : `${C._nl(socP)}%${b.soc_kwh !== undefined ? " · " + C._nl(b.soc_kwh, 2) + " kWh" : ""}`;
+
+    // draad tekenen langs het actieve pad
+    this._path = { blockedGate, planId, rtId, modeId, actiefId: actief ? "actief" : "schaduw",
+                   aggroId, tint: fout ? "red" : planTint || "neutral" };
+    // draad na layout tekenen; de late timer vangt het allereerste render
+    // (element nog niet gemeten) — daarna houdt de ResizeObserver hem bij
+    requestAnimationFrame(() => this._wire());
+    setTimeout(() => this._wire(), 120);
+  }
+
+  _wire() {
+    if (!this._built || !this._path) return;
+    const svg = this._el("wires");
+    const tree = this._el("tree");
+    if (!svg || !tree) return;
+    const tb = tree.getBoundingClientRect();
+    if (tb.width === 0) return;
+    const P = this._path;
+    const colors = { amber: "#ffb86b", green: "#4cc88a", red: "#ff6b81", neutral: "rgba(226,224,212,.45)" };
+    const color = colors[P.tint] || colors.neutral;
+    const pt = (el, edge) => {
+      const r = el.getBoundingClientRect();
+      return [r.left - tb.left + r.width / 2, (edge === "top" ? r.top : r.bottom) - tb.top];
+    };
+    // route: sturing -> alle gates (dwars door de rij) -> aggro -> plan -> rt -> device
+    const stops = [];
+    stops.push(pt(this._opt("sturing", P.actiefId), "bottom"));
+    const gateEls = this._qa('.lvl[data-lvl="gates"] .opt');
+    let stopAt = null;
+    for (const g of gateEls) {
+      const r = g.getBoundingClientRect();
+      stops.push([r.left - tb.left + r.width / 2, r.top - tb.top + r.height / 2]);
+      if (P.blockedGate && g.dataset.opt === P.blockedGate) { stopAt = true; break; }
+    }
+    if (!stopAt) {
+      stops.push(pt(this._opt("aggro", P.aggroId), "top"));
+      stops.push(pt(this._opt("aggro", P.aggroId), "bottom"));
+      stops.push(pt(this._opt("plan", P.planId), "top"));
+      stops.push(pt(this._opt("plan", P.planId), "bottom"));
+      stops.push(pt(this._opt("rt", P.rtId), "top"));
+      stops.push(pt(this._opt("rt", P.rtId), "bottom"));
+      stops.push(pt(this._opt("device", P.modeId), "top"));
+    }
+    svg.setAttribute("viewBox", `0 0 ${tb.width} ${tb.height}`);
+    let d = "";
+    for (let i = 0; i < stops.length; i++) {
+      const [x, y] = stops[i];
+      if (i === 0) { d += `M ${x} ${y}`; continue; }
+      const [px, py] = stops[i - 1];
+      if (Math.abs(py - y) < 2) d += ` L ${x} ${y}`;                    // horizontaal (gates)
+      else d += ` C ${px} ${py + (y - py) * 0.55}, ${x} ${y - (y - py) * 0.55}, ${x} ${y}`;
+    }
+    const end = stops[stops.length - 1] || [0, 0];
+    svg.innerHTML = `
+      <path d="${d}" fill="none" stroke="${color}" stroke-width="1.6"
+            stroke-linecap="round" opacity=".85"/>
+      <circle cx="${end[0]}" cy="${end[1]}" r="3" fill="${color}" opacity=".9"/>`;
   }
 }
 
@@ -295,6 +392,6 @@ customElements.define("wattson-tree-card", WattsonTreeCard);
 window.customCards = window.customCards || [];
 window.customCards.push({
   type: "wattson-tree-card",
-  name: "Wattson state tree",
-  description: "De complete live beslisboom van Wattson: veiligheid, doelfunctie, plan (λ), realtime en apparaat.",
+  name: "Wattson beslisboom",
+  description: "De complete beslisboom van Wattson met alle opties per niveau en het actieve pad als draad.",
 });
