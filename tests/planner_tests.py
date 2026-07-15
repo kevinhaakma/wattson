@@ -65,13 +65,21 @@ def main():
     check("ontladen boven minimum-SoC is wel effectief",
           P.action_is_effective(step(), -1000.0, 5.0, p))
 
+    end = P.plan_end_soc(s, [-1000.0, 0.0, -1000.0], 5.0, p)
+    check("plan_end_soc simuleert de horizon", abs(end - 3.0) < 1e-9)
+    # met standby-drain eindigt hetzelfde plan iets lager (3 uur × 6 W)
+    p_sb = params()
+    p_sb.standby_w = 6.0
+    end_sb = P.plan_end_soc(s, [-1000.0, 0.0, -1000.0], 5.0, p_sb)
+    check("plan_end_soc telt standby-drain mee", abs(end_sb - (3.0 - 0.018)) < 1e-9)
+
     check("zon-assist start binnen uitvoerbare 50 W stap",
           C.SOLAR_ASSIST_IMPORT_W <= 50)
     check("zon-assist stop ligt onder start en track-deadband",
           C.ASSIST_STOP_W < C.SOLAR_ASSIST_IMPORT_W
           and C.ASSIST_STOP_W <= C.TRACK_DEADBAND_W)
 
-    print("\n8/8 PASS")
+    print("\n10/10 PASS")
 
 
 if __name__ == "__main__":

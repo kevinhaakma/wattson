@@ -22,8 +22,16 @@ class Params:
         self.soc_max_kwh = 5.76
         self.p_charge_max_w = 1600.0
         self.p_discharge_max_w = 800.0
-        self.eta_nom = 0.92            # conversierendement één richting, nominaal
-        self.p_fix_w = 25.0            # vaste verliezen per richting
+        # Verliesmodel gekalibreerd op de massabalans van het echte apparaat
+        # (179 u, 2026-07-07..15: 37,3 kWh in / 33,6 kWh uit / ΔSoC −0,67 =
+        # 4,36 kWh verlies; model met deze waarden voorspelt 4,34). De oude
+        # aannames (0,92 / 25 W) overschatten het verlies 2,3× en lieten de
+        # DP winstgevende cycli afwijzen. Een vermogensafhankelijke straf
+        # (p_fix) is in de meetdata niet aantoonbaar; het vaste eigenverbruik
+        # zit apart in standby_w en loopt ALTIJD door (apparaat staat aan).
+        self.eta_nom = 0.955           # conversierendement één richting, nominaal
+        self.p_fix_w = 0.0             # vermogensafhankelijke verliezen per richting
+        self.standby_w = 0.0           # continu eigenverbruik uit de accu (W)
         self.deg_cost = 0.04           # €/kWh doorzet (accu-zijde)
         self.soc_step_kwh = 0.08
         self.charge_levels = (0.0, 400.0, 800.0, 1200.0, 1600.0)
@@ -109,6 +117,12 @@ def hour_result(step, action_w, soc_kwh, params):
         soc = soc_kwh
         action = 0.0
 
+    # continu eigenverbruik (omvormer/BMS/wifi) teert altijd op de lading in,
+    # ook in rust — "vasthouden" is dus niet gratis. Alleen aftoppen tot het
+    # minimum: het apparaat schakelt daaronder zelf uit.
+    if params.standby_w > 0.0:
+        soc = max(soc - params.standby_w / 1000.0, min(soc, params.soc_min_kwh))
+
     kwh = grid / 1000.0
     if kwh >= 0.0:
         cost += kwh * step.price_imp
@@ -133,6 +147,14 @@ def future_reserve_kwh(steps, setpoints, soc0_kwh, params):
         lowest = min(lowest, cumulative)
         soc = soc_next
     return max(-lowest, 0.0)
+
+
+def plan_end_soc(steps, setpoints, soc0_kwh, params):
+    """SoC (kWh) waarmee het plan de horizon verlaat, gesimuleerd via hour_result."""
+    soc = min(max(soc0_kwh, params.soc_min_kwh), params.soc_max_kwh)
+    for step, action in zip(steps, setpoints):
+        _, soc, _, _ = hour_result(step, action, soc, params)
+    return soc
 
 
 def conservative_solar_surplus_kwh(steps, confidence=0.75):
