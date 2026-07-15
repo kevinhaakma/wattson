@@ -3,7 +3,8 @@
 - TrackController : volgt de gemeten huisvraag (snel omhoog, lui omlaag)
 - DischargeGuard  : exportrem voor vaste-setpoint-adapters (marstek/generic)
 - ExportRecovery  : breekt vastgelopen ontladen af bij bevestigde bronexport
-- AssistController: bijspringen op pieken/zonoverschot + frontrun + restant
+- AssistController: bijspringen op afwijkingen van de voorspelling, met
+                    dezelfde beslisregel als het uurplan (marginale waarde λ)
 
 Alle klassen volgen het adapter-patroon: ref naar de coordinator (c) voor
 gedeelde staat (advies, setpoints, laatste actie) en de andere componenten.
@@ -14,12 +15,13 @@ import logging
 import time
 
 from homeassistant.core import callback
+from homeassistant.util import dt as dt_util
 
 from . import adapters as A
-from . import planner as P
 from .const import (
     ASSIST_EXPORT_W,
     ASSIST_IMPORT_W,
+    ASSIST_MARGIN_EUR,
     ASSIST_MAX_SOC_MARGIN_KWH,
     ASSIST_MIN_RUN_S,
     ASSIST_POWER_DEADBAND_W,
@@ -32,8 +34,6 @@ from .const import (
     DISCHARGE_EXPORT_ABORT_HOLD_S,
     DISCHARGE_EXPORT_ABORT_W,
     SETPOINT_ACK_DEADBAND_W,
-    SOLAR_ASSIST_IMPORT_W,
-    STRANDED_MIN_KWH,
     TRACK_DEADBAND_W,
     TRACK_FAST_THROTTLE_S,
     TRACK_LOWER_GRACE_S,
@@ -301,12 +301,17 @@ class ExportRecovery:
             prev = (c.advies, c.last_applied)
             soc_pct = c.t.f(c.ent_soc)
             prijs = c.t.current_price()
-            can_store = (soc_pct is not None and
-                         soc_pct / 100.0 * c.params.capacity_kwh
-                         < c.params.soc_max_kwh - ASSIST_MAX_SOC_MARGIN_KWH)
-            eta_rt = P.eta_oneway(800.0, c.params) ** 2
-            charge_economic = (prijs is not None and
-                               c.budgets.max_future * eta_rt > prijs)
+            soc = (soc_pct / 100.0 * c.params.capacity_kwh
+                   if soc_pct is not None else None)
+            can_store = (soc is not None
+                         and soc < c.params.soc_max_kwh - ASSIST_MAX_SOC_MARGIN_KWH)
+            charge_economic = False
+            if soc is not None and prijs is not None:
+                # zelfde afweging als het plan: opslaan loont als de
+                # misgelopen export onder het laadplafond (λ) blijft
+                exportprijs = c.scenario.export_price(prijs, dt_util.now().date())
+                charge_economic = (exportprijs - c.params.beta
+                                   < c.values.charge_ceiling(soc) - ASSIST_MARGIN_EUR)
 
             # Eerst expliciet rust: daarmee sluit de uitrichting en krijgt de
             # watchdog stop-grace voor eventuele fysieke uitloop. Daarna pas
@@ -338,13 +343,20 @@ class ExportRecovery:
 
 
 class AssistController:
-    """Realtime bijspringen: pieken dekken en zonoverschot opslaan.
+    """Realtime bijspringen op afwijkingen van de voorspelling.
 
-    Ontladen mag uit vier bronnen: (1) vrij boven de planreserve als de prijs
-    economisch is, (2) frontrun — de prijs is nu al minstens de goedkoopste
-    geplande ontlaaduurprijs, (3) zon-gedekt budget, (4) voorzien RESTANT:
-    lading waarmee het plan de horizon toch al verlaat en die dus bij elke
-    prijs boven de restwaarde beter nú de actuele import kan verdringen.
+    Eén beslisregel, dezelfde als het uurplan: vergelijk de actuele
+    voorkeursprijs met de marginale waarde van de accu-inhoud (λ).
+    - onverwachte importpiek: dekken zodra prijs + alpha > ontlaadvloer(SoC)
+    - onverwacht zonoverschot: opslaan zodra exportprijs - beta < laadplafond
+    De oude budget-heuristieken (planreserve, frontrun, zon-gedekt, gestrand
+    restant) zijn hier speciale gevallen van: zakt de lading dan stijgt λ en
+    stopt ontladen vanzelf (reserve); eindigt het plan met surplus dan zakt λ
+    naar de restwaarde en mag elke redelijke piek bediend worden (restant);
+    komt er meer zon aan dan er ruimte is dan zakt λ naar de exportprijs en
+    is opslaan tegen actuele import altijd goed (zon-gedekt). Geplande handel
+    (incl. verkopen boven de huisvraag) doet het uurplan zelf; deze laag
+    reageert alleen op wat de voorspelling niet zag.
     """
 
     def __init__(self, c) -> None:
@@ -396,7 +408,7 @@ class AssistController:
 
     async def apply(self) -> None:
         c = self.c
-        b = c.budgets
+        v = c.values
         await c.safety.watchdog()
         if c.safety.tripped or c.export_recovery.pending:
             return
@@ -406,31 +418,19 @@ class AssistController:
         if p1 is None or soc_pct is None or prijs is None:
             return
         soc = soc_pct / 100.0 * c.params.capacity_kwh
-        vrij = soc - c.params.soc_min_kwh - b.reserve_kwh - ASSIST_SOC_MARGE_KWH
-        physical_free = soc - c.params.soc_min_kwh - ASSIST_SOC_MARGE_KWH
-        # frontrun: is de prijs nú minstens zo hoog als het goedkoopste uur
-        # waarin het plan deze energie later toch al wil ontladen, dan is een
-        # piek nu bedienen strikt beter — de planreserve telt dan niet als
-        # blokkade en de economie-check (herladen tegen netprijs) evenmin
-        floor = b.dis_floor
-        frontrun = floor is not None and prijs >= floor - 0.005
-        vrij_dis = physical_free if frontrun else vrij
-        eta_rt = P.eta_oneway(800.0, c.params) ** 2
+        vrij_dis = soc - c.params.soc_min_kwh - ASSIST_SOC_MARGE_KWH
+        # de beslisregel: dezelfde voorkeursprijzen als de DP. Import
+        # verdringen is prijs + alpha waard; overschot opslaan kost de
+        # misgelopen export (exportprijs - beta). λ levert per actuele SoC
+        # de grens — de kleine marge is hysterese tegen randgeflipper.
+        exportprijs = c.scenario.export_price(prijs, dt_util.now().date())
+        dek_waarde = prijs + c.params.alpha
+        floor = v.discharge_floor(soc)
+        ceil = v.charge_ceiling(soc)
+        discharge_worth = dek_waarde > floor + ASSIST_MARGIN_EUR
+        charge_worth = exportprijs - c.params.beta < ceil - ASSIST_MARGIN_EUR
         prev = (c.advies, c.last_applied)
         source_p1 = self.source_p1(p1)
-        import_need = source_p1 if source_p1 is not None else p1
-        solar_allowed = b.solar_backed_kwh > 0.01 and (
-            c.assist_active == "ontladen" or import_need > SOLAR_ASSIST_IMPORT_W)
-        # voorzien restant: het plan eindigt hiermee toch — elke prijs boven
-        # de restwaarde maakt inzetten nú strikt beter dan laten staan
-        stranded_allowed = b.stranded_allowed(prijs, STRANDED_MIN_KWH)
-        extra_kwh = (b.solar_backed_kwh if solar_allowed else 0.0) + (
-            b.stranded_kwh if stranded_allowed else 0.0)
-        if extra_kwh > 0.0:
-            # Maximaal deze budgetten boven op de gewone planreserve. Iedere
-            # plantick herberekent ze met de dan actuele SoC; naarmate de
-            # accu leger wordt, krimpen ze vanzelf mee.
-            vrij_dis = max(vrij_dis, min(max(physical_free, 0.0), extra_kwh))
 
         peak_ended = source_p1 is not None and source_p1 < ASSIST_STOP_W
         surplus_ended = source_p1 is not None and source_p1 > -ASSIST_STOP_W
@@ -457,26 +457,23 @@ class AssistController:
             peak_ended = held if c.assist_active == "ontladen" else False
             surplus_ended = held if c.assist_active == "laden" else False
         charge_full = soc >= c.params.soc_max_kwh - ASSIST_MAX_SOC_MARGIN_KWH
-        discharge_economic = prijs > b.cheap_future / max(eta_rt, 0.5)
-        charge_economic = b.max_future * eta_rt > prijs
-        discharge_allowed = (discharge_economic or frontrun or solar_allowed
-                             or stranded_allowed)
         if c.assist_active == "ontladen" and (
                 peak_ended or vrij_dis <= 0 or c.ev.charging()
-                or not discharge_allowed):
+                or not discharge_worth):
             c.assist_active = None
             await c.set_battery("rust", 0.0)
             c.advies = "rust"
             c.setpoint_w = 0.0
-            c.reden = "bijspringen klaar (piek, reserve of prijsconditie voorbij)"
+            c.reden = ("bijspringen klaar (piek voorbij)" if peak_ended
+                       else "bijspringen klaar (bewaren is weer waardevoller)")
         elif c.assist_active == "laden" and (
-                surplus_ended or charge_full or not charge_economic):
+                surplus_ended or charge_full or not charge_worth):
             c.assist_active = None
             await c.set_battery("rust", 0.0)
             c.advies = "rust"
             c.setpoint_w = 0.0
             c.reden = ("bijspringen klaar (maximale SoC bereikt)" if charge_full
-                       else "bijspringen klaar (overschot of prijsconditie voorbij)")
+                       else "bijspringen klaar (overschot voorbij of accu vol genoeg)")
         elif c.assist_active == "ontladen":
             if source_p1 is None:
                 return
@@ -498,8 +495,7 @@ class AssistController:
             await c.set_battery("laden", target)
             c.setpoint_w = round(c._last_charge_w)
             c.reden = f"zonoverschot volgt bronexport {-source_p1:.0f} W"
-        elif (((p1 > ASSIST_IMPORT_W and (discharge_economic or frontrun))
-               or (p1 > SOLAR_ASSIST_IMPORT_W and (solar_allowed or stranded_allowed)))
+        elif (p1 > ASSIST_IMPORT_W and discharge_worth
               and not c.ev.charging() and vrij_dis > 0):
             c.assist_active = "ontladen"
             self.started = time.monotonic()
@@ -507,27 +503,17 @@ class AssistController:
             await c.set_battery("ontladen", min(p1, c.params.p_discharge_max_w))
             c.advies = "bijspringen: ontladen"
             c.setpoint_w = -round(c._last_discharge_w)
-            if p1 > SOLAR_ASSIST_IMPORT_W and solar_allowed:
-                c.reden = (f"netimport {p1:.0f} W zon-gedekt; "
-                           f"{b.solar_backed_kwh:.2f} kWh verwacht hervulbaar")
-            elif p1 > SOLAR_ASSIST_IMPORT_W and stranded_allowed and not (
-                    p1 > ASSIST_IMPORT_W and (discharge_economic or frontrun)):
-                c.reden = (f"netimport {p1:.0f} W uit voorzien restant; "
-                           f"{b.stranded_kwh:.2f} kWh blijft anders ongebruikt over")
-            elif discharge_economic:
-                c.reden = f"piek {p1:.0f} W, prijs €{prijs:.3f} > herlaadprijs"
-            else:
-                c.reden = (f"piek {p1:.0f} W, prijs €{prijs:.3f} >= "
-                           f"plan-ontlaadvloer €{floor:.3f} (frontrun)")
-        elif (p1 < -ASSIST_EXPORT_W and soc < c.params.soc_max_kwh - 0.2
-              and charge_economic):
+            c.reden = (f"piek {p1:.0f} W: dekken is €{dek_waarde:.3f}/kWh waard, "
+                       f"bewaren €{floor:.3f}")
+        elif p1 < -ASSIST_EXPORT_W and not charge_full and charge_worth:
             c.assist_active = "laden"
             self.started = time.monotonic()
             self.end_since = None
             await c.set_battery("laden_overschot", min(-p1, c.params.p_charge_max_w))
             c.advies = "bijspringen: laden"
             c.setpoint_w = round(c._last_charge_w)
-            c.reden = f"zonoverschot {-p1:.0f} W, piek later €{b.max_future:.3f}"
+            c.reden = (f"zonoverschot {-p1:.0f} W: opslaan is tot €{ceil:.3f}/kWh "
+                       f"waard, exporteren levert €{exportprijs - c.params.beta:.3f}")
         else:
             return
         c.log_decision(prev)

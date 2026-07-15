@@ -116,7 +116,7 @@ class WattsonCard extends HTMLElement {
                 <div class="wc-popup-item"><span>Accu laadt</span><strong class="wc-popup-charge"></strong></div>
                 <div class="wc-popup-item"><span>Accu ontlaadt</span><strong class="wc-popup-discharge"></strong></div>
                 <div class="wc-popup-item"><span>Prijs nu</span><strong class="wc-popup-price"></strong></div>
-                <div class="wc-popup-item"><span>Reserve</span><strong class="wc-popup-reserve"></strong></div>
+                <div class="wc-popup-item"><span>Bewaarwaarde</span><strong class="wc-popup-lambda"></strong></div>
               </div>
               <div class="wc-popup-section">
                 <div class="wc-popup-line"><span>Gestuurd</span><strong class="wc-popup-command"></strong></div>
@@ -242,7 +242,8 @@ class WattsonCard extends HTMLElement {
     setText(".wc-popup-discharge", watts(inputs.accu_ontladen_w));
     setText(".wc-popup-price", inputs.prijs_nu === undefined
       ? null : `€ ${Number(inputs.prijs_nu).toFixed(3)}/kWh`);
-    setText(".wc-popup-reserve", kwh(attrs.reserve_kwh));
+    setText(".wc-popup-lambda", attrs.marginale_waarde_eur_kwh === undefined
+      ? null : `€ ${Number(attrs.marginale_waarde_eur_kwh).toFixed(3)}/kWh`);
     setText(".wc-popup-command", attrs.laatst_gestuurd);
     setText(".wc-popup-next", attrs.volgende_actie, "nog niets gepland");
     setText(".wc-popup-assist", attrs.bijspringen);

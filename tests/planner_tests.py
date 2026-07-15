@@ -42,24 +42,6 @@ def main():
     p = params()
     s = [step(), step(), step()]
 
-    reserve = P.future_reserve_kwh(s, [-1000.0, 1000.0, -1000.0], 5.0, p)
-    check("reserve telt hergebruikte kWh niet dubbel", abs(reserve - 1.0) < 1e-9)
-
-    reserve = P.future_reserve_kwh(s, [-1000.0, -1000.0, -1000.0], 5.0, p)
-    check("reserve bewaart cumulatief tekort", abs(reserve - 3.0) < 1e-9)
-
-    sun = [step(load_w=500.0, pv_w=2000.0) for _ in range(4)]
-    budget = P.solar_backed_budget_kwh(
-        sun, 6.0, p, confidence=0.75, buffer_kwh=0.75, soc_margin_kwh=0.15)
-    # 4 × (1.5 - 0.5) = 4 kWh conservatief surplus; 4 kWh vrije
-    # accuruimte + 0,75 kWh buffer laat terecht nog niets vrij.
-    check("zonbudget houdt vrije ruimte en buffer apart", budget == 0.0)
-
-    budget = P.solar_backed_budget_kwh(
-        sun, 8.0, p, confidence=0.75, buffer_kwh=0.75, soc_margin_kwh=0.15)
-    check("zonbudget geeft alleen verwacht overlopende energie vrij",
-          abs(budget - 1.25) < 1e-9)
-
     check("ontladen op minimum-SoC is niet effectief",
           not P.action_is_effective(step(), -1000.0, 0.0, p))
     check("ontladen boven minimum-SoC is wel effectief",
@@ -73,13 +55,60 @@ def main():
     end_sb = P.plan_end_soc(s, [-1000.0, 0.0, -1000.0], 5.0, p_sb)
     check("plan_end_soc telt standby-drain mee", abs(end_sb - (3.0 - 0.018)) < 1e-9)
 
-    check("zon-assist start binnen uitvoerbare 50 W stap",
-          C.SOLAR_ASSIST_IMPORT_W <= 50)
-    check("zon-assist stop ligt onder start en track-deadband",
-          C.ASSIST_STOP_W < C.SOLAR_ASSIST_IMPORT_W
-          and C.ASSIST_STOP_W <= C.TRACK_DEADBAND_W)
+    check("assist-start ligt boven stopdrempel en track-deadband",
+          C.ASSIST_STOP_W < C.ASSIST_IMPORT_W
+          and C.TRACK_DEADBAND_W < C.ASSIST_IMPORT_W)
 
-    print("\n10/10 PASS")
+    # --- doelfunctie: alpha/beta ---
+    def pstep(imp, load_w=0.0, sell=True, exp=None):
+        return P.Step(imp, imp if exp is None else exp, load_w, 0.0, sell_ok=sell)
+
+    small = P.Params(capacity_kwh=2.0, soc_min_kwh=0.0, soc_max_kwh=2.0,
+                     p_charge_max_w=1000.0, p_discharge_max_w=1000.0,
+                     eta_nom=1.0, p_fix_w=0.0, deg_cost=0.0,
+                     charge_levels=(0.0, 1000.0), discharge_levels=(0.0, 1000.0))
+
+    # beta = 0: exporteren op het dure uur loont; beta hoog: bewaren wint
+    sp, _ = P.plan([pstep(0.10), pstep(0.40)], 2.0, small)
+    check("zonder beta exporteert de DP op het dure uur", sp[1] < -900.0)
+    small.beta = 0.50
+    sp, _ = P.plan([pstep(0.10), pstep(0.40)], 2.0, small)
+    check("hoge beta houdt eigen energie binnen", sp[1] == 0.0)
+    small.beta = 0.0
+
+    # alpha/beta samen: eigen vraag dekken (0.30) verslaat exporteren (0.35)
+    steps_pref = [pstep(0.30, load_w=500.0, sell=False), pstep(0.35)]
+    sp, _ = P.plan(steps_pref, 0.5, small)
+    check("zonder voorkeur wint de duurdere export",
+          sp[0] == 0.0 and sp[1] < -400.0)
+    small.alpha = 0.04
+    small.beta = 0.04
+    sp, _ = P.plan(steps_pref, 0.5, small)
+    check("met voorkeur wint zelfvoorziening", sp[0] < -400.0 and sp[1] == 0.0)
+    small.alpha = 0.0
+    small.beta = 0.0
+
+    # --- marginale-waardetabel ---
+    # één duur uur, ontlaadcap 1 kWh: onder de cap is een extra kWh de volle
+    # exportprijs waard, erboven niets (vermogensgrens maakt hem waardeloos)
+    sp, _, lam = P.plan_with_values([pstep(0.40)], 0.5, small)
+    check("lambda ziet de komende piek", abs(lam.value(0, 0.5) - 0.40) < 0.02)
+    check("lambda kent de vermogensgrens", lam.value(0, 1.5) < 0.02)
+    check("lambda is niet-stijgend in SoC",
+          lam.value(0, 0.1) >= lam.value(0, 1.9) - 1e-9)
+    check("lambda klemt op horizon en grid",
+          lam.value(99, 5.0) == lam.value(0, 5.0))
+
+    # --- beslisdrempels ---
+    pf = P.Params(eta_nom=0.955, p_fix_w=0.0, deg_cost=0.03)
+    floor = P.discharge_price_floor(0.20, pf)
+    ceil = P.charge_price_ceiling(0.20, pf)
+    check("ontlaadvloer boven lambda (verliezen+slijtage)",
+          abs(floor - (0.20 + 0.03) / 0.955) < 1e-9)
+    check("laadplafond onder lambda", abs(ceil - (0.20 - 0.03) * 0.955) < 1e-9)
+    check("drempels laten winstruimte tussen laden en ontladen", ceil < floor)
+
+    print("\n16/16 PASS")
 
 
 if __name__ == "__main__":

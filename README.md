@@ -312,12 +312,12 @@ The advice sensor exposes:
 - `reden` — why Wattson selected the current action;
 - `volgende_actie` — the next planned charge or discharge action;
 - `historie` — the last 50 decisions with timestamp, setpoint, and reason;
-- `reserve_kwh` — the largest cumulative battery-energy shortfall along the
-  future plan; future charging offsets later discharge, so the same energy is
-  not reserved repeatedly;
-- `zon_gedekt_beschikbaar_kwh` — energy that may be used now because the
-  conservative same-day solar forecast is expected to refill it;
-- `berekend_met` — the price, load, PV, EV, SoC, and horizon inputs;
+- `marginale_waarde_eur_kwh` — the marginal value (λ) of stored energy at the
+  current SoC, straight from the planner's value function;
+- `zelfvoorziening_horizon_pct` — the share of expected household demand that
+  the current plan covers from own PV and battery;
+- `berekend_met` — the price, load, PV, EV, SoC, and horizon inputs, plus the
+  discharge floor and charge ceiling derived from λ;
 - `fout` — the most important current planning or watchdog error.
 
 Decision changes are also written to the Home Assistant logbook. When source
@@ -327,64 +327,57 @@ valid plan can be calculated.
 ## Real-time assistance
 
 With `switch.wattson_bijspringen` enabled, Wattson adds a throttled real-time
-layer above the hourly plan:
+layer above the hourly plan. It reacts to forecast deviations with the **same
+decision rule as the planner itself**: compare the current (preference-adjusted)
+price against the marginal value λ of stored energy at the actual SoC.
 
-- **Peak assist** discharges during an unexpected demand peak only when the
-  current price is above the efficiency-adjusted recharge price, or when the
-  same energy is already scheduled for a later, no-more-valuable discharge
-  hour. It normally starts above 400 W import and preserves the cumulative plan
-  reserve.
-- **Solar-backed import assist** may start from 50 W import when the
-  conservative same-day PV calculation leaves energy that would otherwise no
-  longer fit in the battery. It may temporarily use energy inside the normal
-  plan reserve, but never the minimum-SoC margin, and recalculates the available
-  budget every ten minutes. Once active it stays on until reconstructed demand
-  remains below 40 W, avoiding a start/stop cycle around the old 150 W stop
-  threshold.
-- **Solar-surplus assist** stores unexpected solar export when a more valuable
-  future hour is available.
+- **Unexpected demand peak**: discharge as soon as covering the import is worth
+  more than keeping the energy (`price + alpha > discharge floor`). Starts
+  above 150 W import.
+- **Unexpected solar surplus**: store it as soon as storing beats exporting
+  (`export price − beta < charge ceiling`).
+- The old budget heuristics (plan reserve, front-running, solar-backed budget,
+  stranded-remainder budget) are special cases of this rule and no longer exist
+  as separate code paths: as the battery drains, λ rises and discharging stops
+  by itself; when the plan ends with a surplus, λ drops to the terminal value
+  and serving any reasonable peak becomes worthwhile.
 - Start/stop decisions use the P1 flow reconstructed without Wattson's own
   battery power. A battery that successfully brings grid flow close to zero
   therefore no longer cancels its own assist action.
 - The EV guard always takes priority.
-- Hysteresis avoids rapid switching around the start and stop thresholds.
+- Hysteresis (€0.005 margin, stop-grace, warm-up window) avoids rapid switching
+  around thresholds.
 
 ## Price and export model
 
-The hourly planner values both sides of the meter. For each forecast hour,
-Wattson derives the export price as the import price minus the configured model
-wedge (currently €0.02/kWh). The dynamic program then includes import cost,
-export revenue, conversion losses, and the selected battery-degradation cost.
+The planner optimizes an **explicit objective: money and self-sufficiency
+together**. For each forecast hour it values imports at
+`import price + alpha` and exports at `import price − wedge − beta`, where
+alpha/beta express how much the user values energy independence beyond pure
+cash (the `select.wattson_agressiviteit` entity maps to these). The dynamic
+program then includes import cost, export revenue, conversion losses, and the
+selected battery-degradation cost. With alpha = beta = 0 the battery becomes a
+pure price-arbitrage machine; higher values make self-consumption structurally
+preferred. Self-consumption is thus a consequence of the objective, not a
+hard-coded constraint.
 
-This export price has two separate roles:
-
-- exported household/PV energy is credited at the modeled export price in every
-  candidate plan;
-- deliberate battery export is additionally gated by
-  `switch.wattson_verkopen` and the configured selling threshold.
-
-Solar-backed import assist is an intentional exception to strict price
-optimization. Once conservative forecast solar is expected not to fit, that
-real-time layer prioritizes reducing current grid import and making room in the
-battery. It does **not currently compare the avoided import price now with the
-opportunity value of exporting that future solar**. The hourly plan itself does
-make the export-price comparison; users who require strict cash optimization
-should leave real-time assistance off until an export-opportunity check is
-added.
+Under Dutch net metering the wedge is **measured ≈ €0.00** (export earns the
+full hourly tariff); from 2027-01-01 the scenario layer switches to the
+configured post-net-metering wedge. The provenance and validation of every
+economic parameter is documented in [docs/economie.md](docs/economie.md).
 
 ## Selling
 
-Selling is disabled by default. When `switch.wattson_verkopen` is enabled,
-Wattson may discharge beyond household demand when the calculated export price
-is at or above the configured selling threshold.
+Selling is disabled by default. When `switch.wattson_verkopen` is enabled, the
+planner may discharge beyond household demand whenever the DP finds that
+export revenue beats the marginal value of keeping the energy — there is no
+fixed price threshold; the objective (including beta and degradation cost)
+decides per hour.
 
 - The advice state becomes `verkopen`.
 - Zendure uses a fixed manual discharge setpoint instead of P1 matching.
 - Generic and Marstek deliberately bypass the no-export P1 cap for this action.
 - The EV guard immediately stops selling when an EV starts charging.
-
-This is the only intentional exception to Wattson's default no-battery-export
-rule.
 
 ## Planning stability
 
@@ -470,6 +463,28 @@ or correct operation of connected equipment.
 <div align="center">
 <sub>Built with a local pure-Python rolling-horizon planner — no cloud and no runtime dependencies.</sub>
 </div>
+
+## v3.0.0 — explicit objective and marginal-value dispatch
+
+The foundation changed from a self-consumption optimizer with economic
+patches to an explicit objective: **money and self-sufficiency together**.
+
+- The DP objective now prices imports at `price + alpha` and exports at
+  `price − wedge − beta`; the aggressiveness select maps to (alpha, beta, deg).
+- The planner exports its value function as a marginal-value table λ(t, SoC);
+  the real-time layer makes every decision by comparing the current price with
+  λ — the plan-reserve, front-run, solar-backed and stranded-remainder budget
+  heuristics are gone (`budget.py` removed, replaced by `values.py`).
+- Deliberate export no longer has a fixed price threshold
+  (`verkoop_drempel_eur` removed); the DP decides per hour whether selling
+  beats keeping, gated only by the sell switch.
+- The measured net-metering wedge (≈ €0.00, see docs/economie.md) and a
+  recalibrated degradation cost (€0.03/kWh) went into the retrained parameters;
+  device powers now match reality (2000 W charge / 1400 W discharge).
+- Backtest (95 days, walk-forward): savings **€172/yr under net metering**
+  (was €49) at 98% of the hindsight ceiling, €168/yr post-2027. The
+  aggressiveness knob trades €/yr against self-sufficiency:
+  agressief €172 / 22.7%, gebalanceerd €165 / 27.3%, rustig €140 / 33.2%.
 
 ## v2.0.0 — architecture and model calibration
 

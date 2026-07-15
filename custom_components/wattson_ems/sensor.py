@@ -44,11 +44,11 @@ class WattsonAdviesSensor(SensorEntity):
             "bijspringen": c.assist_active or ("stand-by" if c.assist_enabled else "uit"),
             "verkopen": (
                 "actief" if c.advies == "verkopen"
-                else f"gewapend (drempel €{c.sell_threshold:.2f})" if c.sell_enabled
+                else "gewapend (DP beslist per uur)" if c.sell_enabled
                 else "uit"
             ),
-            "reserve_kwh": round(c.reserve_kwh, 2),
-            "zon_gedekt_beschikbaar_kwh": round(c.solar_backed_kwh, 2),
+            "marginale_waarde_eur_kwh": c.inputs.get("marginale_waarde_eur_kwh"),
+            "zelfvoorziening_horizon_pct": c.inputs.get("zelfvoorziening_horizon_pct"),
             "historie": list(c.history),
             "agressiviteit": c.aggressiveness,
             "adapter": c.adapter,

@@ -63,11 +63,6 @@ CONF_MIN_SOC_PCT = "min_soc_pct"
 CONF_P_CHARGE = "p_charge_max_w"
 CONF_P_DISCHARGE = "p_discharge_max_w"
 
-# verkopen: boven deze kale verkoopprijs (€/kWh, import minus wedge) mag de
-# planner ontladen vóórbij de huisvraag (= exporteren). Alleen actief met de
-# aparte "Wattson verkopen"-switch aan.
-CONF_SELL_THRESHOLD = "verkoop_drempel_eur"
-
 # exportprijs-korting ná het saldering-einde (1-1-2027, zie scenario.py):
 # wat een teruggeleverde kWh dan minder waard is dan een geïmporteerde.
 # Onder saldering komt de wedge uit params.json (getraind, ~0,02).
@@ -109,20 +104,22 @@ DEFAULT_OPTIONS = {
     CONF_MIN_SOC_PCT: 10,
     CONF_P_CHARGE: 1600,
     CONF_P_DISCHARGE: 800,
-    CONF_SELL_THRESHOLD: 0.45,
     CONF_WEDGE_POST: 0.10,
 }
 
 EV_THRESHOLD_KW = 0.5      # daarboven telt als "auto laadt"
 EV_HOUSE_MIN_W = 100       # huisdeel-ontladen tijdens EV pas vanaf deze last
 
-# dynamisch bijspringen (realtime laag bovenop het uurplan)
-ASSIST_IMPORT_W = 400      # huis-import waarboven piek-assist mag starten
-SOLAR_ASSIST_IMPORT_W = 50   # bij aantoonbaar hervulbare energie ook kleine
-                             # netimport vanaf de uitvoerbare Zendure-startstap
+# dynamisch bijspringen (realtime laag bovenop het uurplan). De beslissing
+# zelf is de λ-regel (values.py); deze drempels zijn apparaat-bescherming:
+# geen relais-gecycle voor verwaarloosbare vermogens of flinterdunne marges.
+ASSIST_IMPORT_W = 150      # huis-import waarboven piek-assist mag starten
+                           # (boven de 50 W minimale Zendure-stap en de 100 W
+                           # track-deadband; kleinere piekjes zijn ruis)
 ASSIST_EXPORT_W = 300      # export waarboven overschot-assist mag starten
-ASSIST_STOP_W = 40         # pas stoppen als bronvraag/overschot vrijwel nul is;
-                           # moet onder SOLAR_ASSIST_IMPORT_W blijven
+ASSIST_STOP_W = 40         # pas stoppen als bronvraag/overschot vrijwel nul is
+ASSIST_MARGIN_EUR = 0.005  # hysterese op de λ-vergelijking: prijs moet dit
+                           # boven de vloer / onder het plafond liggen
 ASSIST_THROTTLE_S = 15     # minimale tijd tussen assist-beslissingen (P1 komt
                            # elke ~10 s binnen; 15 s is de natuurlijke vloer)
 ASSIST_SOC_MARGE_KWH = 0.15
@@ -141,19 +138,6 @@ ASSIST_MIN_RUN_S = 180     # opwarmtijd na assist-start: de accutelemetrie
                            # apparaat, dus "piek/overschot voorbij" is in dit
                            # venster geen geldig stopbewijs (harde stops zoals
                            # SoC-vol, EV en reserve blijven wél direct gelden)
-# Voorzien restant (gestrande energie): eindigt het plan de horizon met meer
-# dan dit boven het minimum, dan mag de assist dat surplus inzetten bij elke
-# prijs boven de restwaarde — het heeft binnen de horizon toch geen betere
-# bestemming (finding 2026-07-15: elke ochtend 34-76% restant terwijl de accu
-# vóór de middag alweer vol zat en PV naar export verdrong).
-STRANDED_MIN_KWH = 0.25
-
-# Zon-gedekte ontlading gebruikt alleen het conservatieve deel van de
-# resterende dagprognose. Pas als die productie na de verwachte huislast,
-# vrije accuruimte en deze buffer nog energie overlaat, mag Wattson diezelfde
-# energie alvast inzetten om actuele netimport te voorkomen.
-SOLAR_FORECAST_CONFIDENCE = 0.75
-SOLAR_BUFFER_KWH = 0.75
 UPDATE_MINUTES = 10        # her-plan interval; realtime werk (bijspringen,
                            # EV-guard, discharge-guard) is event-gedreven en
                            # de veiligheid draait apart op WATCH_INTERVAL_S
@@ -214,7 +198,15 @@ DWELL_OVERRIDE_EUR = 0.05  # een wissel die per tick zoveel oplevert (echte
 # vermogenssensor achterloopt (~1 min bij Keba/Tesla) -> één tick niet ontladen
 EV_SUSPECT_JUMP_W = 3000
 
-# agressiviteit = plannings-slijtagegewicht (€/kWh doorzet): lager gewicht =
-# cyclen op kleinere prijsspreads. "gebalanceerd" is de getrainde waarde.
-AGGRO_LEVELS = {"rustig": 0.05, "gebalanceerd": 0.02, "agressief": 0.005}
+# agressiviteit = de knop op de doelfunctie. pref (= alpha = beta, €/kWh) is
+# de zelfvoorzienings-voorkeur: hoe duurder import/hoe onaantrekkelijker
+# export in het planningsdoel. deg is het bijbehorende plannings-
+# slijtagegewicht. Combinaties komen uit de grid-search (backtest 95 dgn,
+# saldering / 2027): agressief €172/€168 pj bij 22,7/35,0% zelfvoorziening,
+# gebalanceerd €165/€166 bij 27,3/37,7%, rustig €140/€159 bij 33,2/39,4%.
+AGGRO_LEVELS = {
+    "rustig": {"pref": 0.05, "deg": 0.01},
+    "gebalanceerd": {"pref": 0.02, "deg": 0.02},
+    "agressief": {"pref": 0.0, "deg": 0.03},
+}
 AGGRO_DEFAULT = "gebalanceerd"

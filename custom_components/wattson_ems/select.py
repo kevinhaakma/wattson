@@ -36,7 +36,11 @@ class WattsonAggroSelect(SelectEntity, RestoreEntity):
         self._apply()
 
     def _apply(self):
-        self.coordinator.params.deg_cost = AGGRO_LEVELS[self._attr_current_option]
+        level = AGGRO_LEVELS[self._attr_current_option]
+        # de doelfunctie-knop: zelfvoorzienings-voorkeur + slijtagegewicht
+        self.coordinator.params.alpha = level["pref"]
+        self.coordinator.params.beta = level["pref"]
+        self.coordinator.params.deg_cost = level["deg"]
         self.coordinator.aggressiveness = self._attr_current_option
 
     async def async_select_option(self, option: str):

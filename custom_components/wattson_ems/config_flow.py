@@ -48,7 +48,6 @@ from .const import (
     CONF_MIN_SOC_PCT,
     CONF_P_CHARGE,
     CONF_P_DISCHARGE,
-    CONF_SELL_THRESHOLD,
     CONF_WEDGE_POST,
     DEFAULT_OPTIONS,
     DOMAIN,
@@ -151,7 +150,6 @@ def _battery_schema(options: dict) -> vol.Schema:
         vol.Required(CONF_MIN_SOC_PCT, default=_value(options, CONF_MIN_SOC_PCT)): vol.Coerce(float),
         vol.Required(CONF_P_CHARGE, default=_value(options, CONF_P_CHARGE)): vol.Coerce(float),
         vol.Required(CONF_P_DISCHARGE, default=_value(options, CONF_P_DISCHARGE)): vol.Coerce(float),
-        vol.Required(CONF_SELL_THRESHOLD, default=_value(options, CONF_SELL_THRESHOLD)): vol.Coerce(float),
         vol.Required(CONF_WEDGE_POST, default=_value(options, CONF_WEDGE_POST)): vol.Coerce(float),
     })
 
@@ -184,7 +182,6 @@ def _validate(merged: dict) -> dict[str, str]:
         min_soc = float(merged.get(CONF_MIN_SOC_PCT, 0))
         p_chg = float(merged.get(CONF_P_CHARGE, 0))
         p_dis = float(merged.get(CONF_P_DISCHARGE, 0))
-        sell = float(merged.get(CONF_SELL_THRESHOLD, 0))
     except (TypeError, ValueError):
         return {"base": "invalid_number"}
     if cap <= 0:
@@ -195,8 +192,6 @@ def _validate(merged: dict) -> dict[str, str]:
         errors[CONF_P_CHARGE] = "must_be_positive"
     if p_dis <= 0:
         errors[CONF_P_DISCHARGE] = "must_be_positive"
-    if sell < 0:
-        errors[CONF_SELL_THRESHOLD] = "must_be_positive"
     try:
         if float(merged.get(CONF_WEDGE_POST, 0)) < 0:
             errors[CONF_WEDGE_POST] = "must_be_positive"

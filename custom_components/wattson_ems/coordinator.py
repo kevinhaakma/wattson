@@ -41,7 +41,6 @@ from homeassistant.util import dt as dt_util
 
 from . import adapters as A
 from . import planner as P
-from .budget import PlanBudgets
 from .const import (
     CONF_ADAPTER,
     CONF_CAPACITY,
@@ -74,7 +73,6 @@ from .const import (
     CONF_MIN_SOC_PCT,
     CONF_P_CHARGE,
     CONF_P_DISCHARGE,
-    CONF_SELL_THRESHOLD,
     CONF_WEDGE_POST,
     DEFAULT_OPTIONS,
     DWELL_OVERRIDE_EUR,
@@ -98,6 +96,7 @@ from .realtime import (
 from .safety import Safety
 from .scenario import PriceScenario
 from .telemetry import Telemetry
+from .values import PlanValues
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -138,7 +137,6 @@ class WattsonCoordinator:
         self.ent_ms_discharge = o(CONF_ENT_MS_DISCHARGE)
         self.ent_bat_chg = o(CONF_ENT_BAT_CHG)
         self.ent_bat_dis = o(CONF_ENT_BAT_DIS)
-        self.sell_threshold = float(o(CONF_SELL_THRESHOLD))
 
         # adapter-implementatie + capabilities; alle merk-specifieke kennis
         # leeft in adapters.py — de coordinator stuurt op self.caps
@@ -176,9 +174,8 @@ class WattsonCoordinator:
         self.scenario = PriceScenario(
             wedge_saldering=cfg["wedge"],
             wedge_post=float(o(CONF_WEDGE_POST)),
-            sell_threshold=self.sell_threshold,
         )
-        self.budgets = PlanBudgets(self.params)
+        self.values = PlanValues(self.params)
         self.safety = Safety(self)
         self.track = TrackController(self)
         self.discharge_guard = DischargeGuard(self)
@@ -221,14 +218,6 @@ class WattsonCoordinator:
     @property
     def watch_error(self) -> str | None:
         return self.safety.watch_error
-
-    @property
-    def reserve_kwh(self) -> float:
-        return self.budgets.reserve_kwh
-
-    @property
-    def solar_backed_kwh(self) -> float:
-        return self.budgets.solar_backed_kwh
 
     # adapters.py en de contract-tests spreken de coordinator aan op deze
     # namen; ze delegeren naar de componenten waar de logica nu leeft
@@ -448,7 +437,9 @@ class WattsonCoordinator:
                 load_w=load,
                 pv_w=pv.get(dt, 0.0),
                 ev_charging=ev_blind if k == 0 else False,
-                sell_ok=self.scenario.sell_ok(price, today, self.sell_enabled),
+                # verkopen is een gebruikers-constraint (switch), geen
+                # prijsdrempel: óf het loont beslist de DP per uur zelf
+                sell_ok=self.sell_enabled,
             ))
 
         tv = P.terminal_value_from_prices([s.price_imp for s in steps], self.params)
@@ -466,25 +457,35 @@ class WattsonCoordinator:
             "ev_laadt": ev_now,
             "horizon_uren": len(steps),
             "eindwaarde_restlading": round(tv, 3),
-            "verkoop_drempel": self.sell_threshold if self.sell_enabled else None,
+            "verkopen_actief": self.sell_enabled,
+            "voorkeur_zelfvoorziening_eur_kwh": self.params.alpha,
             "scenario": self.scenario.label(today),
         }
         warning = self.scenario.transition_warning(today)
         if warning:
             self.inputs["scenario_waarschuwing"] = warning
-        setpoints, cost = P.plan(steps, soc, self.params, terminal_value=tv)
-        self.budgets.compute(prices, steps, setpoints, soc, tv)
-        self.inputs.update(self.budgets.as_inputs())
-        # verwacht planvoordeel: kosten van niets-doen minus plan-kosten, over
-        # dezelfde horizon en symmetrisch verrekend — beide paden starten op de
-        # actuele SoC en krijgen dezelfde eindwaarde voor restlading (plan()
-        # trekt die zelf al af; niets-doen behoudt de volledige startlading)
+        setpoints, cost, lam = P.plan_with_values(
+            steps, soc, self.params, terminal_value=tv)
+        self.values.compute(steps, setpoints, soc, tv, lam)
+        self.inputs.update(self.values.as_inputs(soc))
+        # verwacht planvoordeel in KASGELD: het plan is geoptimaliseerd met de
+        # voorkeursprijzen (alpha/beta), maar de €-sensor rapporteert wat het
+        # werkelijk scheelt — beide paden gesimuleerd met kas-params, zelfde
+        # horizon, zelfde eindwaarde voor restlading
+        cash = P.Params(**self.params.to_dict())
+        cash.alpha = 0.0
+        cash.beta = 0.0
         base = 0.0
-        for s in steps:
-            c0, _, _, _ = P.hour_result(s, 0.0, soc, self.params)
+        cost_cash = 0.0
+        soc_b = soc_c = min(max(soc, cash.soc_min_kwh), cash.soc_max_kwh)
+        for s, a in zip(steps, setpoints):
+            c0, soc_b, _, _ = P.hour_result(s, 0.0, soc_b, cash)
+            c1, soc_c, _, _ = P.hour_result(s, a, soc_c, cash)
             base += c0
-        base -= (soc - self.params.soc_min_kwh) * tv
-        self.expected_saving = round(base - cost, 2)
+            cost_cash += c1
+        base -= (soc_b - cash.soc_min_kwh) * tv
+        cost_cash -= (soc_c - cash.soc_min_kwh) * tv
+        self.expected_saving = round(base - cost_cash, 2)
 
         sp = setpoints[0]
         self.setpoint_w = round(sp)
@@ -511,8 +512,9 @@ class WattsonCoordinator:
             net_home = max(steps[0].load_w - steps[0].pv_w, 0.0)
             if steps[0].sell_ok and -sp > net_home + 100:
                 self.advies = "verkopen"
-                self.reden = (f"verkoopprijs €{steps[0].price_imp - wedge:.3f} "
-                              f">= drempel €{self.sell_threshold:.2f}")
+                self.reden = (f"exportprijs €{steps[0].price_imp - wedge:.3f} "
+                              f"> waarde van bewaren "
+                              f"(λ €{self.values.lam_now(soc):.3f}/kWh)")
             else:
                 self.advies = "ontladen"
                 self.reden = f"duur uur (€{steps[0].price_imp:.3f}), huis vraagt {steps[0].load_w:.0f} W"

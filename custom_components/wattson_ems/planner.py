@@ -7,11 +7,19 @@ Conventies:
 - vermogen in W op AC-zijde; + = laden, - = ontladen (geleverd aan huis)
 - SoC in kWh (bruikbaar venster wordt door soc_min/soc_max begrensd)
 - prijzen in €/kWh; import = incl. belasting, export = wat teruglevering oplevert
-- de accu mag nooit naar het net exporteren (grid_reverse = forbidden):
-  ontladen wordt per uur gemaximeerd op de netto huisvraag.
-  UITZONDERING: een uur met sell_ok=True (verkoopprijs boven de drempel én
-  verkopen expliciet aangezet) mag tot het maximale ontlaadvermogen leveren;
-  het surplus boven de huisvraag gaat tegen de exportprijs het net op.
+
+Doelfunctie: geld én zelfvoorziening, beide expliciet. Naast de kale prijzen
+weegt de planner een voorkeur mee: import telt als prijs + alpha (elke van het
+net gekochte kWh is de gebruiker alpha extra 'waard' om te vermijden), export
+als prijs - beta (eigen energie weggeven is beta minder waard dan de kale
+opbrengst). alpha = beta = 0 geeft pure prijsarbitrage; hogere waarden geven
+zelfvoorziening voorrang. Eigenverbruik is daarmee een gevolg van de
+doelfunctie, geen structurele aanname.
+
+Export: een uur met sell_ok=True (verkopen door de gebruiker aangezet) mag tot
+het maximale ontlaadvermogen leveren; het surplus boven de huisvraag gaat tegen
+de exportprijs het net op. Of dat loont beslist de DP zelf — er is geen vaste
+prijsdrempel. sell_ok=False begrenst ontladen op de netto huisvraag.
 """
 
 
@@ -33,6 +41,11 @@ class Params:
         self.p_fix_w = 0.0             # vermogensafhankelijke verliezen per richting
         self.standby_w = 0.0           # continu eigenverbruik uit de accu (W)
         self.deg_cost = 0.04           # €/kWh doorzet (accu-zijde)
+        # Zelfvoorzienings-voorkeur (€/kWh, geen kasgeld): alpha maakt import
+        # in het planningsdoel duurder, beta maakt export minder waard. De
+        # kas-boekhouding (trainer) rekent altijd met alpha = beta = 0.
+        self.alpha = 0.0
+        self.beta = 0.0
         self.soc_step_kwh = 0.08
         self.charge_levels = (0.0, 400.0, 800.0, 1200.0, 1600.0)
         self.discharge_levels = (0.0, 200.0, 400.0, 600.0, 800.0)
@@ -125,28 +138,12 @@ def hour_result(step, action_w, soc_kwh, params):
 
     kwh = grid / 1000.0
     if kwh >= 0.0:
-        cost += kwh * step.price_imp
+        cost += kwh * (step.price_imp + params.alpha)
     else:
-        cost += kwh * step.price_exp  # negatief: opbrengst teruglevering
+        # negatief: opbrengst teruglevering, verminderd met de
+        # zelfvoorzienings-korting (eigen energie weggeven kost voorkeur)
+        cost += kwh * (step.price_exp - params.beta)
     return cost, soc, action, thru
-
-
-def future_reserve_kwh(steps, setpoints, soc0_kwh, params):
-    """Minimale startenergie die een toekomstig actiepad werkelijk nodig heeft.
-
-    Alleen het grootste cumulatieve energietekort telt als reserve. Toekomstig
-    laden vult een latere ontlading dus eerst aan; alle ontlaaduren simpelweg
-    optellen zou dezelfde kWh meermaals reserveren en realtime gebruik blokkeren.
-    """
-    soc = min(max(soc0_kwh, params.soc_min_kwh), params.soc_max_kwh)
-    cumulative = 0.0
-    lowest = 0.0
-    for step, action in zip(steps, setpoints):
-        _, soc_next, _, _ = hour_result(step, action, soc, params)
-        cumulative += soc_next - soc
-        lowest = min(lowest, cumulative)
-        soc = soc_next
-    return max(-lowest, 0.0)
 
 
 def plan_end_soc(steps, setpoints, soc0_kwh, params):
@@ -157,35 +154,72 @@ def plan_end_soc(steps, setpoints, soc0_kwh, params):
     return soc
 
 
-def conservative_solar_surplus_kwh(steps, confidence=0.75):
-    """Conservatieve netto PV-energie na de verwachte huislast."""
-    net = sum((step.pv_w * confidence - step.load_w) / 1000.0 for step in steps)
-    return max(net, 0.0)
-
-
-def solar_backed_budget_kwh(
-        steps, soc_kwh, params, confidence=0.75, buffer_kwh=0.75,
-        soc_margin_kwh=0.15):
-    """Energie die nu mag worden gebruikt en later conservatief door PV hervult."""
-    surplus = conservative_solar_surplus_kwh(steps, confidence)
-    room = max(params.soc_max_kwh - soc_kwh, 0.0)
-    available = max(soc_kwh - params.soc_min_kwh - soc_margin_kwh, 0.0)
-    return min(max(surplus - room - buffer_kwh, 0.0), available)
-
-
 def action_is_effective(step, action_w, soc_kwh, params, minimum_w=50.0):
     """Of een vastgehouden planactie fysiek nog uitvoerbaar is."""
     _, _, actual_w, _ = hour_result(step, action_w, soc_kwh, params)
     return abs(actual_w) >= minimum_w
 
 
+class LambdaTable:
+    """Marginale waarde van opgeslagen energie: λ(t, SoC) in €/kWh (doel-euro's).
+
+    Afgeleid uit de DP-waardefunctie (λ = -dV/dSoC): wat één extra kWh in de
+    accu aan de rest van de horizon bijdraagt. Realtime beslissingen vergelijken
+    de actuele prijs hiermee — dezelfde afweging als het uurplan, zonder aparte
+    budget-heuristieken. Omdat λ per SoC-punt beschikbaar is, is de planreserve
+    impliciet: zakt de lading, dan stijgt λ en stopt ontladen vanzelf.
+    """
+
+    __slots__ = ("soc_min_kwh", "soc_step_kwh", "rows")
+
+    def __init__(self, soc_min_kwh, soc_step_kwh, rows):
+        self.soc_min_kwh = soc_min_kwh
+        self.soc_step_kwh = soc_step_kwh
+        self.rows = rows  # per uur: λ per SoC-gridvak (lengte n_soc - 1)
+
+    def value(self, t, soc_kwh):
+        """λ op uur t bij deze SoC (€/kWh); klemt op horizon- en gridranden."""
+        if not self.rows:
+            return 0.0
+        row = self.rows[max(0, min(t, len(self.rows) - 1))]
+        if not row:
+            return 0.0
+        i = int((soc_kwh - self.soc_min_kwh) / self.soc_step_kwh)
+        return row[max(0, min(i, len(row) - 1))]
+
+
+def discharge_price_floor(lam, params):
+    """Minimale opbrengst (€/kWh, AC-zijde) waarbij nú ontladen beter is dan
+    de energie bewaren: het verlies aan toekomstwaarde plus slijtage, gedeeld
+    door het conversierendement."""
+    eta = eta_oneway(params.p_discharge_max_w, params)
+    if eta <= 0.0:
+        return float("inf")
+    return (lam + params.deg_cost) / eta
+
+
+def charge_price_ceiling(lam, params):
+    """Maximale kostprijs (€/kWh, AC-zijde) waarbij nú laden loont: de
+    toekomstwaarde minus slijtage, maal het conversierendement."""
+    eta = eta_oneway(params.p_charge_max_w, params)
+    return (lam - params.deg_cost) * eta
+
+
 def plan(steps, soc0_kwh, params, terminal_value=0.0):
+    """Backward-induction DP; zie plan_with_values. Retourneert
+    (setpoints_w, expected_cost) — setpoints per uur, +laden/-ontladen."""
+    setpoints, total, _ = plan_with_values(steps, soc0_kwh, params, terminal_value)
+    return setpoints, total
+
+
+def plan_with_values(steps, soc0_kwh, params, terminal_value=0.0):
     """Backward-induction DP.
 
     terminal_value: €/kWh voor lading die aan het eind van de horizon over is
     (de 'waarde van morgen'); voorkomt dat de planner leegdumpt op een matige piek.
 
-    Retourneert (setpoints_w, expected_cost) — setpoints per uur, +laden/-ontladen.
+    Retourneert (setpoints_w, expected_cost, LambdaTable) — het plan plus de
+    marginale-waardetabel waarop realtime beslissingen dezelfde afweging maken.
     """
     n_soc = int(round((params.soc_max_kwh - params.soc_min_kwh) / params.soc_step_kwh)) + 1
     grid_soc = [params.soc_min_kwh + i * params.soc_step_kwh for i in range(n_soc)]
@@ -197,7 +231,8 @@ def plan(steps, soc0_kwh, params, terminal_value=0.0):
 
     # V[i] = minimale kosten vanaf dit punt bij SoC grid_soc[i]
     V = [-(s - params.soc_min_kwh) * terminal_value for s in grid_soc]
-    best = []  # per stap: beste actie per SoC-index
+    best = []      # per stap: beste actie per SoC-index
+    lam_rows = []  # per stap: λ per SoC-gridvak (−ΔV/Δsoc)
     for step in reversed(steps):
         Vn = [0.0] * n_soc
         bn = [0.0] * n_soc
@@ -209,9 +244,12 @@ def plan(steps, soc0_kwh, params, terminal_value=0.0):
                 if bc is None or tot < bc - 1e-9:
                     bc, ba = tot, a
             Vn[i], bn[i] = bc, ba
+        lam_rows.append([(Vn[i] - Vn[i + 1]) / params.soc_step_kwh
+                         for i in range(n_soc - 1)])
         V = Vn
         best.append(bn)
     best.reverse()
+    lam_rows.reverse()
 
     # forward pass: haal het pad op
     setpoints = []
@@ -223,7 +261,7 @@ def plan(steps, soc0_kwh, params, terminal_value=0.0):
         setpoints.append(act)
         total += c
     total -= (soc - params.soc_min_kwh) * terminal_value
-    return setpoints, total
+    return setpoints, total, LambdaTable(params.soc_min_kwh, params.soc_step_kwh, lam_rows)
 
 
 def terminal_value_from_prices(future_prices, params):
@@ -234,5 +272,6 @@ def terminal_value_from_prices(future_prices, params):
         return 0.0
     cheap = sorted(future_prices)[: max(1, len(future_prices) // 6)]
     p_cheap = sum(cheap) / len(cheap)
-    eta_rt = eta_oneway(800.0, params) * eta_oneway(800.0, params)
+    eta_rt = (eta_oneway(params.p_charge_max_w, params)
+              * eta_oneway(params.p_discharge_max_w, params))
     return p_cheap * eta_rt
