@@ -7,7 +7,7 @@
 **Explainable smart home battery control for Home Assistant**
 
 [![HACS Custom](https://img.shields.io/badge/HACS-Custom-1565C0.svg?style=for-the-badge)](https://github.com/hacs/integration)
-[![Version](https://img.shields.io/badge/version-1.9.1-00B4B0.svg?style=for-the-badge)](#)
+[![Version](https://img.shields.io/badge/version-2.0.0-00B4B0.svg?style=for-the-badge)](#)
 [![License](https://img.shields.io/badge/license-MIT-1565C0.svg?style=for-the-badge)](#)
 [![Maintained](https://img.shields.io/badge/maintained-yes-22C55E.svg?style=for-the-badge)](#)
 
@@ -114,10 +114,11 @@ price for the active hour so that it does not execute a future setpoint early.
 
 ### Solar forecast treatment
 
-The packaged forecast calibration is `pv_bias = 1.0`: forecast energy is not
-scaled up. Current PV power is taken from the live power sensor. Forecast
-quality remains installation-specific, so it should be checked against actual
-daily production before active control is enabled.
+The packaged forecast calibration is `pv_bias = 1.05` (measured: the daily
+forecast source underestimates actual production by ~5%). Current PV power is
+taken from the live power sensor without bias — that is a measurement, not a
+forecast. Forecast quality remains installation-specific, so it should be
+checked against actual daily production before active control is enabled.
 
 Solar-backed real-time discharge is deliberately more conservative than the
 hourly plan. It uses only the remaining complete hours of the current day,
@@ -469,3 +470,28 @@ or correct operation of connected equipment.
 <div align="center">
 <sub>Built with a local pure-Python rolling-horizon planner — no cloud and no runtime dependencies.</sub>
 </div>
+
+## v2.0.0 — architecture and model calibration
+
+The coordinator has been decomposed into single-responsibility components
+(`telemetry`, `ev`, `forecast`, `scenario`, `budget`, `safety`, `realtime`);
+the coordinator itself only wires them together and runs the plan tick.
+
+Model changes, all calibrated against measured device data:
+
+- **Loss model**: one-way efficiency 0.955 with no power-dependent penalty
+  (mass balance over 179 h matched within 0.02 kWh; the old 0.92 + 25 W
+  assumptions overestimated losses 2.3x and rejected profitable cycles).
+- **Standby drain**: the device draws ~6 W from the battery continuously;
+  the planner now prices "holding" accordingly (`standby_w`).
+- **Load profile**: retrained with an EV home-gate — vehicle telemetry from
+  charging elsewhere no longer suppresses the evening demand profile (it was
+  50-90% too low between 17:00 and 21:00).
+- **Stranded-energy assist**: each plan tick forecasts the expected demand and
+  the residual charge at the end of the horizon. Residual energy that has no
+  better destination within the horizon may be used to displace current grid
+  import at any price above its terminal value.
+- **Net-metering transition**: the export-price wedge is now date-aware. Until
+  2027-01-01 the trained net-metering wedge applies; after that a configurable
+  post-net-metering wedge (option, default 0.10 EUR/kWh). The advice sensor
+  warns 60 days ahead of the transition.

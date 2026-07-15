@@ -49,6 +49,7 @@ from .const import (
     CONF_P_CHARGE,
     CONF_P_DISCHARGE,
     CONF_SELL_THRESHOLD,
+    CONF_WEDGE_POST,
     DEFAULT_OPTIONS,
     DOMAIN,
 )
@@ -151,6 +152,7 @@ def _battery_schema(options: dict) -> vol.Schema:
         vol.Required(CONF_P_CHARGE, default=_value(options, CONF_P_CHARGE)): vol.Coerce(float),
         vol.Required(CONF_P_DISCHARGE, default=_value(options, CONF_P_DISCHARGE)): vol.Coerce(float),
         vol.Required(CONF_SELL_THRESHOLD, default=_value(options, CONF_SELL_THRESHOLD)): vol.Coerce(float),
+        vol.Required(CONF_WEDGE_POST, default=_value(options, CONF_WEDGE_POST)): vol.Coerce(float),
     })
 
 
@@ -195,6 +197,11 @@ def _validate(merged: dict) -> dict[str, str]:
         errors[CONF_P_DISCHARGE] = "must_be_positive"
     if sell < 0:
         errors[CONF_SELL_THRESHOLD] = "must_be_positive"
+    try:
+        if float(merged.get(CONF_WEDGE_POST, 0)) < 0:
+            errors[CONF_WEDGE_POST] = "must_be_positive"
+    except (TypeError, ValueError):
+        errors[CONF_WEDGE_POST] = "invalid_number"
     adapter = merged.get(CONF_ADAPTER)
     if adapter == ADAPTER_GENERIC:
         has_signed = bool(merged.get(CONF_ENT_GEN_POWER))

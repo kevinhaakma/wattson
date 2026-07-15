@@ -68,6 +68,11 @@ CONF_P_DISCHARGE = "p_discharge_max_w"
 # aparte "Wattson verkopen"-switch aan.
 CONF_SELL_THRESHOLD = "verkoop_drempel_eur"
 
+# exportprijs-korting ná het saldering-einde (1-1-2027, zie scenario.py):
+# wat een teruggeleverde kWh dan minder waard is dan een geïmporteerde.
+# Onder saldering komt de wedge uit params.json (getraind, ~0,02).
+CONF_WEDGE_POST = "wedge_post_saldering"
+
 # ---------- defaults ----------
 # Bewust géén entity-id's: elke installatie kiest zijn eigen bronnen in de
 # setup-wizard / options-flow. Een lege waarde betekent "niet geconfigureerd";
@@ -105,6 +110,7 @@ DEFAULT_OPTIONS = {
     CONF_P_CHARGE: 1600,
     CONF_P_DISCHARGE: 800,
     CONF_SELL_THRESHOLD: 0.45,
+    CONF_WEDGE_POST: 0.10,
 }
 
 EV_THRESHOLD_KW = 0.5      # daarboven telt als "auto laadt"
@@ -135,6 +141,13 @@ ASSIST_MIN_RUN_S = 180     # opwarmtijd na assist-start: de accutelemetrie
                            # apparaat, dus "piek/overschot voorbij" is in dit
                            # venster geen geldig stopbewijs (harde stops zoals
                            # SoC-vol, EV en reserve blijven wél direct gelden)
+# Voorzien restant (gestrande energie): eindigt het plan de horizon met meer
+# dan dit boven het minimum, dan mag de assist dat surplus inzetten bij elke
+# prijs boven de restwaarde — het heeft binnen de horizon toch geen betere
+# bestemming (finding 2026-07-15: elke ochtend 34-76% restant terwijl de accu
+# vóór de middag alweer vol zat en PV naar export verdrong).
+STRANDED_MIN_KWH = 0.25
+
 # Zon-gedekte ontlading gebruikt alleen het conservatieve deel van de
 # resterende dagprognose. Pas als die productie na de verwachte huislast,
 # vrije accuruimte en deze buffer nog energie overlaat, mag Wattson diezelfde

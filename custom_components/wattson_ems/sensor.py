@@ -52,7 +52,7 @@ class WattsonAdviesSensor(SensorEntity):
             "historie": list(c.history),
             "agressiviteit": c.aggressiveness,
             "adapter": c.adapter,
-            "watchdog_telemetrie": "actief" if any(c._bat_flow_entities()) else "niet geconfigureerd",
+            "watchdog_telemetrie": "actief" if any(c.bat_flow_entities()) else "niet geconfigureerd",
             "export_guard": "apparaat-P1-matching" if c.caps.p1_matching else "Wattson P1-guard",
             "sturing_actief": c.control_enabled,
             "laatst_gestuurd": c.last_applied,

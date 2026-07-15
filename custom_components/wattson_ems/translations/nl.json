@@ -54,7 +54,8 @@
           "min_soc_pct": "Minimaal laadniveau (%)",
           "p_charge_max_w": "Maximaal laadvermogen (W)",
           "p_discharge_max_w": "Maximaal ontlaadvermogen (W)",
-          "verkoop_drempel_eur": "Verkoopdrempel (€/kWh)"
+          "verkoop_drempel_eur": "Verkoopdrempel (€/kWh)",
+          "wedge_post_saldering": "Exportprijs-korting na einde saldering (EUR/kWh, vanaf 2027)"
         }
       }
     },
@@ -105,7 +106,8 @@
           "ent_ms_mode": "Marstek: force-mode entity (select of number, 0=stop/1=laden/2=ontladen)",
           "ent_ms_charge": "Marstek: forcible laadvermogen-number (W)",
           "ent_ms_discharge": "Marstek: forcible ontlaadvermogen-number (W)",
-          "verkoop_drempel_eur": "Verkoop-drempel (€/kWh kale verkoopprijs; verkoop-switch moet aan staan)"
+          "verkoop_drempel_eur": "Verkoop-drempel (€/kWh kale verkoopprijs; verkoop-switch moet aan staan)",
+          "wedge_post_saldering": "Exportprijs-korting na einde saldering (EUR/kWh, vanaf 2027)"
         }
       }
     },
