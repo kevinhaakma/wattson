@@ -366,9 +366,20 @@ class WattsonCoordinator:
             _LOGGER.exception("Wattson: adapter-noodstopmaatregelen faalden")
 
     def log_decision(self, prev) -> None:
-        """Historie bijhouden en logbook-regel schrijven bij een wijziging."""
+        """Historie bijhouden en logbook-regel schrijven bij een wijziging.
+
+        Alleen échte modus-wissels tellen: een vermogens-bijstelling binnen
+        dezelfde modus (de volglus zet "manual (+230 W)" -> "manual (+362 W)"
+        elke ~30 s bij pulserende last) spamde de 50-regel-historie vol en
+        drukte de werkelijke beslissingen eruit (nacht 15->16 juli: alle 50
+        regels waren volg-stapjes)."""
         now = dt_util.now().strftime("%Y-%m-%d %H:%M")
-        if (self.advies, self.last_applied) == prev:
+
+        def key(state):
+            advies, applied = state
+            return (advies, (applied or "").split(" (")[0])
+
+        if key((self.advies, self.last_applied)) == key(prev):
             return
         self.history.appendleft({
             "tijd": now,
