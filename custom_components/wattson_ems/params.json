@@ -4,29 +4,132 @@
  "wedge": 0.0,
  "deg_cost": 0.03,
  "load_pct": 0.5,
+ "risk_shape_steps": [
+  0.0,
+  0.0671,
+  0.0614,
+  0.0575,
+  0.0546,
+  0.0522,
+  0.0498,
+  0.0477,
+  0.0455,
+  0.0438,
+  0.0425,
+  0.041,
+  0.0384,
+  0.0373,
+  0.0359,
+  0.0342,
+  0.0334,
+  0.0325,
+  0.0323,
+  0.0326,
+  0.032,
+  0.0315,
+  0.0311,
+  0.0325,
+  0.0335
+ ],
+ "risk_k": 0.05,
  "alpha": 0.0,
  "beta": 0.0,
  "pref_curve": [
   {
    "pref": 0.0,
+   "risk": 0.0,
    "deg": 0.03,
    "load_pct": 0.5,
    "total": 115.87,
    "zelfvoorziening_pct": 22.7
   },
   {
+   "pref": 0.0,
+   "risk": 0.02,
+   "deg": 0.03,
+   "load_pct": 0.5,
+   "total": 115.79,
+   "zelfvoorziening_pct": 23.0
+  },
+  {
+   "pref": 0.0,
+   "risk": 0.05,
+   "deg": 0.03,
+   "load_pct": 0.5,
+   "total": 115.7,
+   "zelfvoorziening_pct": 23.0
+  },
+  {
+   "pref": 0.0,
+   "risk": 0.1,
+   "deg": 0.03,
+   "load_pct": 0.5,
+   "total": 115.8,
+   "zelfvoorziening_pct": 23.2
+  },
+  {
    "pref": 0.02,
+   "risk": 0.0,
    "deg": 0.02,
    "load_pct": 0.5,
    "total": 117.56,
    "zelfvoorziening_pct": 27.3
   },
   {
+   "pref": 0.02,
+   "risk": 0.02,
+   "deg": 0.02,
+   "load_pct": 0.5,
+   "total": 117.59,
+   "zelfvoorziening_pct": 27.5
+  },
+  {
+   "pref": 0.02,
+   "risk": 0.05,
+   "deg": 0.02,
+   "load_pct": 0.5,
+   "total": 117.57,
+   "zelfvoorziening_pct": 27.7
+  },
+  {
+   "pref": 0.02,
+   "risk": 0.1,
+   "deg": 0.02,
+   "load_pct": 0.5,
+   "total": 117.69,
+   "zelfvoorziening_pct": 27.6
+  },
+  {
    "pref": 0.05,
+   "risk": 0.0,
    "deg": 0.01,
    "load_pct": 0.5,
    "total": 124.07,
    "zelfvoorziening_pct": 33.2
+  },
+  {
+   "pref": 0.05,
+   "risk": 0.02,
+   "deg": 0.01,
+   "load_pct": 0.5,
+   "total": 123.88,
+   "zelfvoorziening_pct": 33.2
+  },
+  {
+   "pref": 0.05,
+   "risk": 0.05,
+   "deg": 0.01,
+   "load_pct": 0.5,
+   "total": 124.1,
+   "zelfvoorziening_pct": 33.3
+  },
+  {
+   "pref": 0.05,
+   "risk": 0.1,
+   "deg": 0.01,
+   "load_pct": 0.5,
+   "total": 124.66,
+   "zelfvoorziening_pct": 33.4
   }
  ],
  "pv_bias": 1.05,

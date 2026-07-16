@@ -99,6 +99,22 @@ def main():
     check("lambda klemt op horizon en grid",
           lam.value(99, 5.0) == lam.value(0, 5.0))
 
+    # --- onzekerheids-discount: bij (bijna-)gelijkspel wint het huis nú ---
+    tie = P.Params(capacity_kwh=2.0, soc_min_kwh=0.0, soc_max_kwh=2.0,
+                   p_charge_max_w=1000.0, p_discharge_max_w=1000.0,
+                   eta_nom=1.0, p_fix_w=0.0, deg_cost=0.0,
+                   charge_levels=(0.0,), discharge_levels=(0.0, 1000.0))
+    steps_tie = [pstep(0.30, load_w=1000.0, sell=False),
+                 pstep(0.31, load_w=1000.0, sell=False)]
+    sp, _ = P.plan(steps_tie, 1.0, tie)
+    check("zonder discount wint het latere, iets duurdere uur",
+          sp[0] == 0.0 and sp[1] < -900.0)
+    tie.risk_k = 1.0
+    tie.risk_steps = (0.0,) + (0.05,) * 24
+    sp, _ = P.plan(steps_tie, 1.0, tie)
+    check("met discount wint zekere dekking nu",
+          sp[0] < -900.0 and sp[1] == 0.0)
+
     # --- beslisdrempels ---
     pf = P.Params(eta_nom=0.955, p_fix_w=0.0, deg_cost=0.03)
     floor = P.discharge_price_floor(0.20, pf)
@@ -108,7 +124,7 @@ def main():
     check("laadplafond onder lambda", abs(ceil - (0.20 - 0.03) * 0.955) < 1e-9)
     check("drempels laten winstruimte tussen laden en ontladen", ceil < floor)
 
-    print("\n16/16 PASS")
+    print("\n18/18 PASS")
 
 
 if __name__ == "__main__":

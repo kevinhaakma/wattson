@@ -157,6 +157,8 @@ class WattsonCoordinator:
             discharge_levels=tuple(p_dis * i / 4 for i in range(5)),
             eta_nom=b["eta_nom"], p_fix_w=b["p_fix_w"],
             standby_w=b.get("standby_w", 0.0), deg_cost=cfg["deg_cost"],
+            risk_k=cfg.get("risk_k", 0.0),
+            risk_steps=tuple(cfg.get("risk_shape_steps", ())),
         )
         self.pv_bias = cfg["pv_bias"]
         self.trained_at = cfg["trained_at"]
@@ -500,6 +502,7 @@ class WattsonCoordinator:
         cash = P.Params(**self.params.to_dict())
         cash.alpha = 0.0
         cash.beta = 0.0
+        cash.risk_k = 0.0
         base = 0.0
         cost_cash = 0.0
         soc_b = soc_c = min(max(soc, cash.soc_min_kwh), cash.soc_max_kwh)

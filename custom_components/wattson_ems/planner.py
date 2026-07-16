@@ -46,6 +46,15 @@ class Params:
         # kas-boekhouding (trainer) rekent altijd met alpha = beta = 0.
         self.alpha = 0.0
         self.beta = 0.0
+        # Onzekerheids-discount ("bij twijfel wint het huis nú"): risk_steps
+        # is de op eigen data getrainde per-uur-toename van de cumulatieve
+        # prognosefout (genormaliseerd, zie training/fit_risk.py); risk_k de
+        # sterkte. De DP vermenigvuldigt toekomstwaarde per stap met
+        # (1 - risk_k * stap): een zeker voordeel nu verslaat daardoor een
+        # even groot maar onzeker voordeel later, terwijl grote spreads
+        # (avondpiek) de kleine haircut moeiteloos overleven.
+        self.risk_k = 0.0
+        self.risk_steps = ()
         self.soc_step_kwh = 0.08
         self.charge_levels = (0.0, 400.0, 800.0, 1200.0, 1600.0)
         self.discharge_levels = (0.0, 200.0, 400.0, 600.0, 800.0)
@@ -229,18 +238,31 @@ def plan_with_values(steps, soc0_kwh, params, terminal_value=0.0):
         i = int(round((soc - params.soc_min_kwh) / params.soc_step_kwh))
         return max(0, min(n_soc - 1, i))
 
+    # onzekerheids-fade per stap: de waarde van alles vanaf uur t+1 telt,
+    # gezien vanaf uur t, licht af met de getrainde prognose-onzekerheid.
+    # Compounding door de recursie benadert de cumulatieve foutcurve.
+    rk = params.risk_k
+    rs = params.risk_steps
+    def fade(lead):
+        if rk <= 0.0 or not rs:
+            return 1.0
+        s = rs[min(lead, len(rs) - 1)]
+        return max(1.0 - rk * s, 0.5)
+
     # V[i] = minimale kosten vanaf dit punt bij SoC grid_soc[i]
     V = [-(s - params.soc_min_kwh) * terminal_value for s in grid_soc]
     best = []      # per stap: beste actie per SoC-index
     lam_rows = []  # per stap: λ per SoC-gridvak (−ΔV/Δsoc)
-    for step in reversed(steps):
+    for t_abs in range(len(steps) - 1, -1, -1):
+        step = steps[t_abs]
+        f = fade(t_abs + 1)
         Vn = [0.0] * n_soc
         bn = [0.0] * n_soc
         for i, soc in enumerate(grid_soc):
             bc, ba = None, 0.0
             for a in actions:
                 c, soc2, act, _ = hour_result(step, a, soc, params)
-                tot = c + V[snap(soc2)]
+                tot = c + V[snap(soc2)] * f
                 if bc is None or tot < bc - 1e-9:
                     bc, ba = tot, a
             Vn[i], bn[i] = bc, ba

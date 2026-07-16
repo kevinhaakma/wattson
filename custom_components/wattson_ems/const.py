@@ -213,8 +213,8 @@ EV_SUSPECT_JUMP_W = 3000
 # saldering / 2027): agressief €172/€168 pj bij 22,7/35,0% zelfvoorziening,
 # gebalanceerd €165/€166 bij 27,3/37,7%, rustig €140/€159 bij 33,2/39,4%.
 AGGRO_LEVELS = {
-    "rustig": {"pref": 0.05, "deg": 0.01},
-    "gebalanceerd": {"pref": 0.02, "deg": 0.02},
-    "agressief": {"pref": 0.0, "deg": 0.03},
+    "rustig": {"pref": 0.05, "deg": 0.01, "risk": 0.10},
+    "gebalanceerd": {"pref": 0.02, "deg": 0.02, "risk": 0.05},
+    "agressief": {"pref": 0.0, "deg": 0.03, "risk": 0.02},
 }
 AGGRO_DEFAULT = "gebalanceerd"
