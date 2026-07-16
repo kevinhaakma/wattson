@@ -222,6 +222,18 @@ class WattsonTreeCard extends HTMLElement {
         .netkv { text-align:right; font-size:12px; color:rgba(255,255,255,.86); font-weight:600; }
         .netkv small { display:block; font-weight:400; font-size:10.5px;
                        color:rgba(255,255,255,.42); }
+        .strip2 { display:flex; align-items:center; gap:10px; margin-top:10px; }
+        .s2l { font-size:10px; font-weight:600; letter-spacing:.12em; text-transform:uppercase;
+               color:rgba(255,255,255,.34); white-space:nowrap; }
+        .s2bar { position:relative; flex:1; height:6px; border-radius:3px;
+                 background:rgba(255,255,255,.08); }
+        .s2blend { position:absolute; left:0; top:0; bottom:0; border-radius:3px 0 0 3px;
+                   background:rgba(255,184,107,.30); }
+        .s2mark { position:absolute; top:-3px; bottom:-3px; width:2px; border-radius:1px;
+                  background:#4cc88a; box-shadow:0 0 6px rgba(76,200,138,.6);
+                  transition:left .8s ease; }
+        .s2mark.warn { background:#ffb86b; box-shadow:0 0 6px rgba(255,184,107,.6); }
+        .s2t { font-size:11px; color:rgba(255,255,255,.56); white-space:nowrap; }
       </style>
       <ha-card>
         <div class="head">
@@ -255,6 +267,14 @@ class WattsonTreeCard extends HTMLElement {
             <div class="battxt"><span id="bat-v">–</span><small id="bat-s">–</small></div>
           </div>
           <div class="netkv"><span id="net-v">–</span><small id="net-s">net</small></div>
+        </div>
+        <div class="strip2" id="strip2" style="display:none;">
+          <span class="s2l">saldering</span>
+          <div class="s2bar">
+            <i class="s2blend" id="s2blend"></i>
+            <i class="s2mark" id="s2mark"></i>
+          </div>
+          <span class="s2t" id="s2txt">–</span>
         </div>
       </ha-card>`;
     this._el = (id) => root.getElementById(id);
@@ -439,6 +459,22 @@ class WattsonTreeCard extends HTMLElement {
     const p1 = this._num(this._config.p1);
     this._el("net-v").textContent = p1 === null ? "–" : `${C._nl(Math.abs(p1))} W`;
     this._el("net-s").textContent = p1 === null ? "net" : p1 >= 0 ? "import van net" : "export naar net";
+
+    // salderingsruimte-meter (alleen met geconfigureerde jaarbewaking)
+    const ruimte = b.salderingsruimte_kwh;
+    const s2 = this._el("strip2");
+    if (typeof ruimte === "number") {
+      s2.style.display = "";
+      const schaal = 600, blend = 300;
+      this._el("s2blend").style.width = (blend / schaal * 100) + "%";
+      const mark = this._el("s2mark");
+      mark.style.left = Math.max(0, Math.min(ruimte / schaal, 1)) * 100 + "%";
+      mark.className = "s2mark" + (ruimte < blend ? " warn" : "");
+      this._el("s2txt").textContent = `${C._nl(ruimte)} kWh over`
+        + (b.wedge_effectief ? ` · wedge ${C._ct(b.wedge_effectief)}` : "");
+    } else {
+      s2.style.display = "none";
+    }
 
     // draad langs het actieve pad
     this._path = { blockedGate, planId, rtId, modeId, actiefId: actief ? "actief" : "schaduw",
