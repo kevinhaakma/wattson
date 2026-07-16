@@ -23,11 +23,13 @@ demping + uitvoeren) en het gedeelde stuur-boekhoudinkje (set_battery).
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
 import time
 from collections import deque
+from dataclasses import replace
 from datetime import timedelta
 
 from homeassistant.config_entries import ConfigEntry
@@ -41,6 +43,7 @@ from homeassistant.util import dt as dt_util
 
 from . import adapters as A
 from . import planner as P
+from . import planning_service as PS
 from .const import (
     CONF_ADAPTER,
     CONF_CAPACITY,
@@ -90,6 +93,14 @@ from .const import (
 from .ev import EvMonitor
 from .forecast import LoadProfile, PvCurve
 from .netting import NettingMonitor
+from .control import (
+    AdviceMode,
+    BatteryAction,
+    BatteryCommand,
+    CommandArbiter,
+    CommandSource,
+    Decision,
+)
 from .realtime import (
     AssistController,
     DischargeGuard,
@@ -196,28 +207,72 @@ class WattsonCoordinator:
         self.sell_enabled = False      # verkopen boven drempelprijs (aparte switch)
         self.assist_active: str | None = None
         self.aggressiveness = "gebalanceerd"
-        self.advies = "init"
-        self.setpoint_w = 0.0
+        self._decision = Decision(AdviceMode.INIT)
         self.plan_hours: list[dict] = []
         self.expected_saving = 0.0
         self.inputs: dict = {}
         self.plan_error: str | None = None
         self.last_applied: str | None = None
-        self.reden: str = ""
-        self.volgende_actie: str | None = None
         self.history: deque = deque(maxlen=50)
         self._had_success = False
         self._retry_cancel = None
-        self._last_action: str | None = None
+        self._last_action: BatteryAction | None = None
         self._last_charge_w = 0.0      # laatst werkelijk toegepast laadvermogen
         self._last_discharge_w = 0.0   # laatst werkelijk toegepast ontlaadvermogen
         self._switch_debt = 0.0        # opgeteld gemist voordeel van gedempte modewissels
         self._last_mode_switch = 0.0
         self._last_load_w: float | None = None  # huisvraag vorige tick (EV-sprong-detectie)
+        self.command_arbiter = CommandArbiter()
+        self._tick_lock = asyncio.Lock()
+        self._replan_pending = False
         self.listeners: list = []
         self.sensors: list = []
 
     # ---------- compat / delegaties ----------
+    @property
+    def decision(self) -> Decision:
+        return self._decision
+
+    @property
+    def mode(self) -> AdviceMode:
+        return self._decision.mode
+
+    def set_decision(self, decision: Decision) -> None:
+        self._decision = decision
+
+    @property
+    def advies(self) -> str:
+        """Bestaand UI-contract; interne logica gebruikt ``mode``."""
+        return self._decision.mode.value
+
+    @advies.setter
+    def advies(self, value: AdviceMode | str) -> None:
+        self._decision = replace(self._decision, mode=AdviceMode.parse(value))
+
+    @property
+    def setpoint_w(self) -> float:
+        return self._decision.setpoint_w
+
+    @setpoint_w.setter
+    def setpoint_w(self, value: float) -> None:
+        self._decision = replace(self._decision, setpoint_w=float(value))
+
+    @property
+    def reden(self) -> str:
+        return self._decision.reason
+
+    @reden.setter
+    def reden(self, value: str) -> None:
+        self._decision = replace(self._decision, reason=value)
+
+    @property
+    def volgende_actie(self) -> str | None:
+        return self._decision.next_action
+
+    @volgende_actie.setter
+    def volgende_actie(self, value: str | None) -> None:
+        self._decision = replace(self._decision, next_action=value)
+
     @property
     def last_error(self) -> str | None:
         """Het advies-sensor-attribuut 'fout' toont de ernstigste actuele fout."""
@@ -236,12 +291,6 @@ class WattsonCoordinator:
     @_tripped.setter
     def _tripped(self, value: str | None) -> None:
         self.safety.tripped = value
-
-    def _f(self, entity: str) -> float | None:
-        return self.t.f(entity)
-
-    def _power_w(self, entity: str) -> float | None:
-        return self.t.power_w(entity)
 
     def _fresh_power_w(self, entity: str, max_age_s: float | None = None) -> float | None:
         if max_age_s is None:
@@ -311,7 +360,12 @@ class WattsonCoordinator:
             self._retry_cancel = None
         if self.control_enabled:
             try:
-                await self.set_battery("rust", 0.0)
+                self.command_arbiter.invalidate_pending()
+                await self.set_battery(
+                    BatteryAction.IDLE,
+                    0.0,
+                    source=CommandSource.LIFECYCLE,
+                )
             except Exception:  # noqa: BLE001 - unload mag nooit blokkeren
                 _LOGGER.exception("Wattson: accu naar rust bij unload faalde")
 
@@ -332,6 +386,18 @@ class WattsonCoordinator:
 
     # ---------- kern ----------
     async def _tick(self, _now) -> None:
+        """Serialiseer replans; een trigger tijdens een run vraagt één rerun."""
+        if self._tick_lock.locked():
+            self._replan_pending = True
+            return
+        async with self._tick_lock:
+            while True:
+                self._replan_pending = False
+                await self._tick_once()
+                if not self._replan_pending:
+                    break
+
+    async def _tick_once(self) -> None:
         prev = (self.advies, self.last_applied)
         try:
             await self.safety.watchdog()
@@ -341,14 +407,16 @@ class WattsonCoordinator:
             self.plan_error = str(err)
             _LOGGER.exception("Wattson-tick faalde")
             if self.control_enabled:
-                await self.set_battery("rust", 0.0)  # veilige stand
+                self.command_arbiter.invalidate_pending()
+                await self.set_battery(
+                    BatteryAction.IDLE, 0.0, source=CommandSource.SAFETY)
         await self.safety.stale_guard()
         # zolang er nog geen geslaagd plan is (bronnen traag na herstart):
         # niet 5 minuten wachten maar elke 45 s opnieuw proberen
-        if self.advies == "geen data" and not self._had_success:
+        if self.mode is AdviceMode.NO_DATA and not self._had_success:
             if self._retry_cancel is None:
                 self._retry_cancel = async_call_later(self.hass, 45, self._retry)
-        elif self.advies != "geen data":
+        elif self.mode is not AdviceMode.NO_DATA:
             self._had_success = True
         self.log_decision(prev)
         self.write_entities()
@@ -364,23 +432,34 @@ class WattsonCoordinator:
         daarna mag de adapter extra maatregelen nemen (bv. apparaat-limieten
         van de foute richting dichtzetten als hij die heeft).
         """
+        self.command_arbiter.invalidate_pending()
         try:
-            await self.set_battery("rust", 0.0)
+            await self.set_battery(
+                BatteryAction.IDLE, 0.0, source=CommandSource.SAFETY)
         except Exception:  # noqa: BLE001 - noodstop mag nooit zelf crashen
             _LOGGER.exception("Wattson: noodstop via adapter faalde")
         try:
-            await self.adapter_impl.emergency_stop(richting)
+            command = self.command_arbiter.command(
+                BatteryAction.IDLE,
+                0.0,
+                p1_cap=False,
+                source=CommandSource.SAFETY,
+            )
+
+            async def apply_emergency(_command: BatteryCommand) -> float:
+                await self.adapter_impl.emergency_stop(richting)
+                return 0.0
+
+            await self.command_arbiter.execute(command, apply_emergency)
         except Exception:  # noqa: BLE001
             _LOGGER.exception("Wattson: adapter-noodstopmaatregelen faalden")
 
     def log_decision(self, prev) -> None:
         """Historie bijhouden en logbook-regel schrijven bij een wijziging.
 
-        Alleen échte modus-wissels tellen: een vermogens-bijstelling binnen
-        dezelfde modus (de volglus zet "manual (+230 W)" -> "manual (+362 W)"
-        elke ~30 s bij pulserende last) spamde de 50-regel-historie vol en
-        drukte de werkelijke beslissingen eruit (nacht 15->16 juli: alle 50
-        regels waren volg-stapjes)."""
+        Alleen échte modus-wissels tellen: vermogens-bijstellingen binnen
+        dezelfde modus (volglus-stapjes elke ~30 s) zouden de 50-regel-
+        historie volspammen en de werkelijke beslissingen eruit drukken."""
         now = dt_util.now().strftime("%Y-%m-%d %H:%M")
 
         def key(state):
@@ -408,15 +487,37 @@ class WattsonCoordinator:
             pass
 
     async def _plan_and_apply(self) -> None:
-        prev_advies = self.advies
-        prev_setpoint = self.setpoint_w
+        previous = self.decision
         assist_reason = self.reden if self.assist_active else None
+        context = await self._build_plan_context()
+        if context is None:
+            self.set_decision(Decision(AdviceMode.NO_DATA))
+            return
+
+        evaluation = PS.evaluate(
+            context.steps,
+            context.soc_kwh,
+            self.params,
+            context.terminal_value,
+        )
+        self._update_plan_outputs(context, evaluation)
+        self.set_decision(PS.decision_from_plan(
+            evaluation.setpoints[0],
+            context.steps[0],
+            context.wedge,
+            self.values.lam_now(context.soc_kwh),
+            self.plan_hours,
+        ))
+        self._stabilize_decision(previous, context, evaluation)
+        self._guard_suspect_ev(context)
+        await self._apply_decision(context, assist_reason)
+
+    async def _build_plan_context(self) -> PS.PlanningContext | None:
+        """Lees één consistente snapshot en bouw de DP-stappen."""
         prices = self.t.price_forecast()
         soc_pct = self.t.f(self.ent_soc)
         if not prices or soc_pct is None:
-            self.advies = "geen data"
-            self.setpoint_w = 0.0
-            return
+            return None
         soc = soc_pct / 100.0 * self.params.capacity_kwh
         hours = [dt for dt, _ in prices]
         pv = self.pv.curve(hours)
@@ -479,118 +580,110 @@ class WattsonCoordinator:
                 sell_ok=self.sell_enabled,
             ))
 
-        tv = P.terminal_value_from_prices([s.price_imp for s in steps], self.params)
+        tv = P.terminal_value_from_prices(
+            [step.price_imp for step in steps], self.params)
+        return PS.PlanningContext(
+            prices=prices,
+            steps=steps,
+            soc_kwh=soc,
+            soc_pct=soc_pct,
+            pv_w=pv,
+            today=today,
+            wedge=wedge,
+            ev_now=ev_now,
+            terminal_value=tv,
+            p1_now_w=p1_now,
+            battery_charge_w=b_chg_now,
+            battery_discharge_w=b_dis_now,
+        )
+
+    def _update_plan_outputs(
+        self,
+        context: PS.PlanningContext,
+        evaluation: PS.PlanEvaluation,
+    ) -> None:
+        """Publiceer rekenuitkomsten; verandert nog geen fysieke sturing."""
+        steps = context.steps
         self.inputs = {
-            "soc_kwh": round(soc, 2),
-            "soc_pct": round(soc_pct, 1),
+            "soc_kwh": round(context.soc_kwh, 2),
+            "soc_pct": round(context.soc_pct, 1),
             "prijs_nu": round(steps[0].price_imp, 4),
-            "p1_nu_w": None if p1_now is None else round(p1_now),
+            "p1_nu_w": (None if context.p1_now_w is None
+                         else round(context.p1_now_w)),
             "huislast_nu_w": round(steps[0].load_w),
             "pv_nu_w": round(steps[0].pv_w),
-            "accu_laden_w": round(b_chg_now),
-            "accu_ontladen_w": round(b_dis_now),
+            "accu_laden_w": round(context.battery_charge_w),
+            "accu_ontladen_w": round(context.battery_discharge_w),
             "pv_rest_vandaag_kwh": round(self.pv.remain_kwh(), 1),
             "pv_morgen_kwh": round(self.pv.tomorrow_kwh(), 1),
-            "ev_laadt": ev_now,
+            "ev_laadt": context.ev_now,
             "horizon_uren": len(steps),
-            "eindwaarde_restlading": round(tv, 3),
+            "eindwaarde_restlading": round(context.terminal_value, 3),
             "verkopen_actief": self.sell_enabled,
             "voorkeur_zelfvoorziening_eur_kwh": self.params.alpha,
-            "scenario": self.scenario.label(today),
-            "wedge_effectief": round(wedge, 3),
+            "scenario": self.scenario.label(context.today),
+            "wedge_effectief": round(context.wedge, 3),
         }
         if self.netting.configured and self.netting.headroom_kwh is not None:
             self.inputs["salderingsruimte_kwh"] = round(self.netting.headroom_kwh)
-        warning = self.scenario.transition_warning(today)
+        warning = self.scenario.transition_warning(context.today)
         if warning:
             self.inputs["scenario_waarschuwing"] = warning
-        setpoints, cost, lam = P.plan_with_values(
-            steps, soc, self.params, terminal_value=tv)
-        self.values.compute(steps, setpoints, soc, tv, lam)
-        self.inputs.update(self.values.as_inputs(soc))
-        # verwacht planvoordeel in KASGELD: het plan is geoptimaliseerd met de
-        # voorkeursprijzen (alpha/beta), maar de €-sensor rapporteert wat het
-        # werkelijk scheelt — beide paden gesimuleerd met kas-params, zelfde
-        # horizon, zelfde eindwaarde voor restlading
-        cash = P.Params(**self.params.to_dict())
-        cash.alpha = 0.0
-        cash.beta = 0.0
-        cash.risk_k = 0.0
-        base = 0.0
-        cost_cash = 0.0
-        soc_b = soc_c = min(max(soc, cash.soc_min_kwh), cash.soc_max_kwh)
-        for s, a in zip(steps, setpoints):
-            c0, soc_b, _, _ = P.hour_result(s, 0.0, soc_b, cash)
-            c1, soc_c, _, _ = P.hour_result(s, a, soc_c, cash)
-            base += c0
-            cost_cash += c1
-        base -= (soc_b - cash.soc_min_kwh) * tv
-        cost_cash -= (soc_c - cash.soc_min_kwh) * tv
-        self.expected_saving = round(base - cost_cash, 2)
+        self.values.compute(
+            steps,
+            evaluation.setpoints,
+            context.soc_kwh,
+            context.terminal_value,
+            evaluation.lambda_table,
+        )
+        self.inputs.update(self.values.as_inputs(context.soc_kwh))
+        self.expected_saving = evaluation.expected_saving
+        self.plan_hours = PS.plan_hours(
+            context.prices,
+            steps,
+            evaluation.setpoints,
+            context.soc_kwh,
+            self.params,
+            lambda when: dt_util.as_local(when).strftime("%H:%M"),
+        )
 
-        sp = setpoints[0]
-        self.setpoint_w = round(sp)
-        self.plan_hours = []
-        soc_sim = soc
-        for (dt, pr), a, st in list(zip(prices, setpoints, steps))[:16]:
-            _, soc_sim, _, _ = P.hour_result(st, a, soc_sim, self.params)
-            self.plan_hours.append({
-                "tijd": dt_util.as_local(dt).strftime("%H:%M"),
-                "prijs": round(pr, 3),
-                "setpoint_w": round(a),
-                "soc_na_kwh": round(soc_sim, 2),
-                "verwachte_last_w": round(st.load_w),
-                "verwachte_pv_w": round(st.pv_w),
-            })
-        # volgende geplande actie (voor het "waarom wacht hij"-inzicht)
-        nxt = next((p for p in self.plan_hours if abs(p["setpoint_w"]) > 50), None)
-        if sp > 50:
-            self.advies = "laden"
-            self.reden = f"goedkoop uur (€{steps[0].price_imp:.3f})"
-            self.volgende_actie = None
-        elif sp < -50:
-            # ontladen boven de actuele netto-huisvraag kan alleen verkopen zijn
-            net_home = max(steps[0].load_w - steps[0].pv_w, 0.0)
-            if steps[0].sell_ok and -sp > net_home + 100:
-                self.advies = "verkopen"
-                self.reden = (f"exportprijs €{steps[0].price_imp - wedge:.3f} "
-                              f"> waarde van bewaren "
-                              f"(λ €{self.values.lam_now(soc):.3f}/kWh)")
-            else:
-                self.advies = "ontladen"
-                self.reden = f"duur uur (€{steps[0].price_imp:.3f}), huis vraagt {steps[0].load_w:.0f} W"
-            self.volgende_actie = None
-        else:
-            self.advies = "rust"
-            if nxt and nxt is not self.plan_hours[0]:
-                act = "laden" if nxt["setpoint_w"] > 0 else "ontladen"
-                self.reden = f"wacht: {act} om {nxt['tijd']} (€{nxt['prijs']:.3f})"
-                self.volgende_actie = f"{act} om {nxt['tijd']} ({nxt['setpoint_w']:+d} W)"
-            else:
-                self.reden = "spread te klein binnen de horizon"
-                self.volgende_actie = None
-
-        # wissel-demping: een marginale modewissel (rust <-> laden/ontladen)
-        # gaat pas door als het cumulatieve voordeel de drempel overschrijdt.
-        # Het voordeel wordt exact bepaald met een extra DP-run waarin het
-        # eerste uur wordt vastgezet op de huidige stand; zo stopt het
-        # pendelen rond break-even zonder echte marge weg te geven.
-        # verkopen hoort er sinds v3 bij: zonder drempel is het een gewone
-        # DP-uitkomst en pendelde hij vrij tussen verkopen/laden/rust bij
-        # bijna-gelijke waardes (2026-07-15 20:00-20:32: 4 wissels in 32 min)
-        stickable = ("rust", "laden", "ontladen", "verkopen")
-        if (prev_advies in stickable and self.advies in stickable
-                and self.advies != prev_advies and not ev_now and len(steps) > 1):
-            forced = 0.0 if prev_advies == "rust" else prev_setpoint
-            c0, soc1, _, _ = P.hour_result(steps[0], forced, soc, self.params)
-            _, rest = P.plan(steps[1:], soc1, self.params, terminal_value=tv)
-            voordeel = max((c0 + rest) - cost, 0.0)
+    def _stabilize_decision(
+        self,
+        previous: Decision,
+        context: PS.PlanningContext,
+        evaluation: PS.PlanEvaluation,
+    ) -> None:
+        """Pas economische wisseldemping toe op een vers DP-besluit."""
+        # wissel-demping: een marginale modewissel gaat pas door als het
+        # cumulatieve voordeel de drempel overschrijdt. Het voordeel wordt
+        # exact bepaald met een extra DP-run waarin het eerste uur wordt
+        # vastgezet op de huidige stand; zo stopt het pendelen rond
+        # break-even zonder echte marge weg te geven. verkopen telt mee:
+        # het is een gewone DP-uitkomst en pendelt anders net zo hard.
+        steps = context.steps
+        stickable = {
+            AdviceMode.IDLE,
+            AdviceMode.CHARGE,
+            AdviceMode.DISCHARGE,
+            AdviceMode.SELL,
+        }
+        if (previous.mode in stickable and self.mode in stickable
+                and self.mode is not previous.mode
+                and not context.ev_now and len(steps) > 1):
+            forced = 0.0 if previous.mode is AdviceMode.IDLE else previous.setpoint_w
+            c0, soc1, _, _ = P.hour_result(
+                steps[0], forced, context.soc_kwh, self.params)
+            _, rest = P.plan(
+                steps[1:], soc1, self.params,
+                terminal_value=context.terminal_value)
+            voordeel = max((c0 + rest) - evaluation.cost, 0.0)
             # Een oude laad/ontlaadstand die door SoC-, PV- of lastgrenzen
             # fysiek niets meer kan doen, mag nooit door de euro-demping blijven
             # hangen. Rust (of de nieuwe uitvoerbare richting) volgt direct.
             stale_active_mode = (
-                prev_advies != "rust"
-                and not P.action_is_effective(steps[0], forced, soc, self.params)
+                previous.mode is not AdviceMode.IDLE
+                and not P.action_is_effective(
+                    steps[0], forced, context.soc_kwh, self.params)
             )
             if stale_active_mode:
                 self._switch_debt = 0.0
@@ -601,40 +694,60 @@ class WattsonCoordinator:
             if stale_active_mode:
                 pass
             elif self._switch_debt < SWITCH_DEADBAND_EUR:
-                self.reden = (f"houdt {prev_advies} vast — wissel naar {self.advies} "
-                              f"levert cumulatief €{self._switch_debt:.3f} op "
-                              f"(drempel €{SWITCH_DEADBAND_EUR:.2f})")
-                self.advies = prev_advies
-                self.setpoint_w = 0.0 if prev_advies == "rust" else prev_setpoint
+                self.set_decision(replace(
+                    self.decision,
+                    mode=previous.mode,
+                    setpoint_w=(0.0 if previous.mode is AdviceMode.IDLE
+                                else previous.setpoint_w),
+                    reason=(f"houdt {previous.mode.value} vast — wissel naar "
+                            f"{self.mode.value} levert cumulatief "
+                            f"€{self._switch_debt:.3f} op "
+                            f"(drempel €{SWITCH_DEADBAND_EUR:.2f})"),
+                ))
             elif dwelling and voordeel < DWELL_OVERRIDE_EUR:
                 # vlakke prijzen laten de DP elke tick van gedachten wisselen;
                 # net gewisseld + klein voordeel per tick = relais met rust
                 # laten. Een echte piek (voordeel >= override) gaat wél door.
-                self.reden = (f"houdt {prev_advies} vast — wisselde "
-                              f"<{PLAN_MIN_DWELL_S // 60} min geleden en "
-                              f"€{voordeel:.3f}/tick blijft onder de "
-                              f"override €{DWELL_OVERRIDE_EUR:.2f}")
-                self.advies = prev_advies
-                self.setpoint_w = 0.0 if prev_advies == "rust" else prev_setpoint
+                self.set_decision(replace(
+                    self.decision,
+                    mode=previous.mode,
+                    setpoint_w=(0.0 if previous.mode is AdviceMode.IDLE
+                                else previous.setpoint_w),
+                    reason=(f"houdt {previous.mode.value} vast — wisselde "
+                            f"<{PLAN_MIN_DWELL_S // 60} min geleden en "
+                            f"€{voordeel:.3f}/tick blijft onder de "
+                            f"override €{DWELL_OVERRIDE_EUR:.2f}"),
+                ))
             else:
                 self._switch_debt = 0.0
                 self._last_mode_switch = time.monotonic()
         else:
             self._switch_debt = 0.0
 
+    def _guard_suspect_ev(self, context: PS.PlanningContext) -> None:
+        """Parkeer één tick bij een onbevestigde, EV-achtige lastsprong."""
         # verdachte lastsprong: huisvraag springt hard omhoog zonder dat een
         # wallbox het bevestigt -> mogelijk een EV-start met achterlopende
         # vermogenstelemetrie; één tick niet ontladen tot er duidelijkheid is
         vorige_last = self._last_load_w
-        self._last_load_w = steps[0].load_w
-        if (self.advies in ("ontladen", "verkopen") and not ev_now
+        load_w = context.steps[0].load_w
+        self._last_load_w = load_w
+        if (self.mode in (AdviceMode.DISCHARGE, AdviceMode.SELL)
+                and not context.ev_now
                 and vorige_last is not None
-                and steps[0].load_w - vorige_last > EV_SUSPECT_JUMP_W):
-            self.advies = "rust (EV-check)"
-            self.setpoint_w = 0.0
-            self.reden = (f"lastsprong +{steps[0].load_w - vorige_last:.0f} W zonder "
-                          "wallbox-bevestiging — één tick wachten op EV-telemetrie")
+                and load_w - vorige_last > EV_SUSPECT_JUMP_W):
+            self.set_decision(Decision(
+                AdviceMode.EV_CHECK,
+                reason=f"lastsprong +{load_w - vorige_last:.0f} W zonder "
+                "wallbox-bevestiging — één tick wachten op EV-telemetrie",
+            ))
 
+    async def _apply_decision(
+        self,
+        context: PS.PlanningContext,
+        assist_reason: str | None,
+    ) -> None:
+        """Voer één gestabiliseerd besluit uit via de command-arbiter."""
         if not self.control_enabled or self.safety.tripped:
             return
         if self.ent_zd_hems:
@@ -644,89 +757,147 @@ class WattsonCoordinator:
                 self.last_applied = "geblokkeerd: accu-AI (HEMS) staat nog aan"
                 return
         self.ev.house_share_active = False
-        if self.advies == "laden":
+        if self.mode is AdviceMode.CHARGE:
             self.assist_active = None
             # is er nú meer PV-overschot dan het geplande laadvermogen, gebruik
-            # dan native surplus-matching: die pakt het hele overschot (gratis,
-            # volgt wolken vanzelf) i.p.v. een vast setpoint dat de rest laat
-            # wegexporteren. Demotie terug naar vast (net-)laden alleen op
-            # aangehouden bewijs: het gemeten laadvermogen moet het plan een
-            # heel venster niet gedragen hebben (track.surplus_carried) — een
-            # wolkgat precies op het tick-moment flipte anders elke tick de
-            # modus heen en weer (14:35-incident: demotie + 23 s later promotie).
-            surplus_w = max(steps[0].pv_w - steps[0].load_w, 0.0)
+            # dan native surplus-matching: die pakt het hele overschot i.p.v.
+            # een vast setpoint dat de rest laat wegexporteren. Demotie terug
+            # naar vast netladen alleen op aangehouden bewijs over een heel
+            # venster (track.surplus_carried) — anti-flapping bij wolkgaten.
+            first_step = context.steps[0]
+            surplus_w = max(first_step.pv_w - first_step.load_w, 0.0)
             blijf_overschot = (self._last_action == "laden_overschot"
                                and self.track.surplus_carried(abs(self.setpoint_w)))
             if self.caps.surplus_mode and (
                     surplus_w >= abs(self.setpoint_w) or blijf_overschot):
-                await self.set_battery("laden_overschot", abs(self.setpoint_w))
+                await self.set_battery(
+                    BatteryAction.SURPLUS_CHARGE, abs(self.setpoint_w))
             else:
-                await self.set_battery("laden", abs(self.setpoint_w))
-        elif self.advies == "verkopen" and not ev_now:
+                await self.set_battery(
+                    BatteryAction.CHARGE, abs(self.setpoint_w))
+        elif self.mode is AdviceMode.SELL and not context.ev_now:
             self.assist_active = None
-            await self.set_battery("verkopen", abs(self.setpoint_w))
-        elif self.advies == "ontladen" and not ev_now:
+            await self.set_battery(BatteryAction.SELL, abs(self.setpoint_w))
+        elif self.mode is AdviceMode.DISCHARGE and not context.ev_now:
             self.assist_active = None
-            await self.set_battery("ontladen", abs(self.setpoint_w))
-        elif self.advies == "ontladen" and ev_now:
+            await self.set_battery(BatteryAction.DISCHARGE, abs(self.setpoint_w))
+        elif self.mode is AdviceMode.DISCHARGE and context.ev_now:
             # v1.9: EV laadt — de accu dekt alléén het huisdeel. De wallbox
             # meet zijn eigen vermogen, dus de EV-gecorrigeerde huislast
             # (steps[0].load_w) is betrouwbaar. Een vast manual-setpoint op
             # die huislast levert precies dat deel zonder de auto mee te
             # voeden. Voorwaarde: verse wallbox-telemetrie — anders het oude
             # veilige gedrag (rust).
+            # advies 'ontladen' tijdens EV kan alleen met verse wallbox-
+            # telemetrie ontstaan (anders zet ev_blind de planner op rust),
+            # dus load_w is hier betrouwbaar EV-gecorrigeerd
             self.assist_active = None
-            wb_fresh = self.ev.sum_fresh_w(180)
-            huis_w = min(max(steps[0].load_w, 0.0), self.params.p_discharge_max_w)
-            if wb_fresh > EV_THRESHOLD_KW * 1000.0 and huis_w >= EV_HOUSE_MIN_W:
+            huis_w = min(
+                max(context.steps[0].load_w, 0.0),
+                self.params.p_discharge_max_w,
+            )
+            if huis_w >= EV_HOUSE_MIN_W:
                 # BEWUST het "verkopen"-pad: dat omzeilt de normale P1-cap,
                 # zodat exact de EV-gecorrigeerde huislast als vast vermogen
                 # wordt gezet. Hertaxatie volgt iedere plantick.
-                await self.set_battery("verkopen", huis_w)
+                applied = await self.set_battery(BatteryAction.SELL, huis_w)
+                if applied is None:
+                    return
                 self.ev.house_share_active = True
-                self.setpoint_w = -round(huis_w)
-                self.reden = f"EV laadt — accu dekt alleen het huisdeel ({huis_w:.0f} W, vast)"
+                self.set_decision(replace(
+                    self.decision,
+                    setpoint_w=-round(huis_w),
+                    reason=(f"EV laadt — accu dekt alleen het huisdeel "
+                            f"({huis_w:.0f} W, vast)"),
+                ))
             else:
-                await self.set_battery("rust", 0.0)
-                self.setpoint_w = 0.0
-                self.reden = ("EV laadt — wallbox-telemetrie niet vers, accu rust"
-                              if wb_fresh <= EV_THRESHOLD_KW * 1000.0
-                              else f"EV laadt — huislast te klein ({huis_w:.0f} W), accu rust")
+                await self.set_battery(BatteryAction.IDLE, 0.0)
+                self.set_decision(Decision(
+                    AdviceMode.IDLE,
+                    reason=f"EV laadt — huislast te klein ({huis_w:.0f} W), accu rust",
+                ))
         elif self.assist_active:
             # Het uurplan adviseert rust, maar de realtime-laag loopt nog. Houd
             # advies/setpoint daarmee in lijn: anders kan de volgende watchdog
             # de door Wattson zelf gestuurde activiteit als runaway beoordelen.
-            self.advies = f"bijspringen: {self.assist_active}"
             if self.assist_active == "laden":
-                self.setpoint_w = round(self._last_charge_w)
+                mode = AdviceMode.ASSIST_CHARGE
+                setpoint = round(self._last_charge_w)
             else:
-                self.setpoint_w = -round(self._last_discharge_w)
-            if assist_reason:
-                self.reden = assist_reason
+                mode = AdviceMode.ASSIST_DISCHARGE
+                setpoint = -round(self._last_discharge_w)
+            self.set_decision(Decision(
+                mode,
+                setpoint,
+                assist_reason or self.reden,
+            ))
         else:
-            await self.set_battery("rust", 0.0)
+            await self.set_battery(BatteryAction.IDLE, 0.0)
 
-    async def set_battery(self, action: str, power_w: float, *, p1_cap: bool = True) -> None:
+    async def set_battery(
+        self,
+        action: BatteryAction | str,
+        power_w: float,
+        *,
+        p1_cap: bool = True,
+        source: CommandSource = CommandSource.PLANNER,
+    ) -> float | None:
         """Stuur de accu via de adapter (laden/ontladen/verkopen/rust).
 
         p1_cap=False slaat de momentane P1-begrenzing over — voor de
         discharge-guard, die zelf al een lager (delta-gebaseerd) vermogen
         heeft berekend en niet nogmaals gecapt moet worden.
         """
-        if action == "laden_overschot" and not self.caps.surplus_mode:
-            action = "laden"  # geen native overschot-modus op dit merk
-        applied = await self.adapter_impl.apply(action, power_w, p1_cap=p1_cap)
+        action = BatteryAction.parse(action)
+        if action is BatteryAction.SURPLUS_CHARGE and not self.caps.surplus_mode:
+            action = BatteryAction.CHARGE
+        command = self.command_arbiter.command(
+            action, power_w, p1_cap=p1_cap, source=source)
+        result = await self.command_arbiter.execute(command, self._apply_command)
+        if result.skipped:
+            _LOGGER.debug(
+                "Wattson: verouderd %s-commando overgeslagen (%s)",
+                action.value, source.value,
+            )
+            return None
+        applied = result.applied_w
         # eigen stop geregistreerd: het apparaat loopt (cloud-latentie) nog even
         # uit in de oude richting — de watchdog mag dat geen runaway noemen
-        if action == "rust" and self._last_action in (
-                "laden", "laden_overschot", "ontladen", "verkopen"):
+        if action is BatteryAction.IDLE and self._last_action is not None:
+            previous_action = BatteryAction.parse(self._last_action)
             self.safety.note_own_stop(
-                "laden" if self._last_action in ("laden", "laden_overschot") else "ontladen")
+                "laden" if previous_action.is_charge else "ontladen")
         self._last_action = action
-        self._last_charge_w = applied if action in ("laden", "laden_overschot") else 0.0
-        self._last_discharge_w = applied if action in ("ontladen", "verkopen") else 0.0
-        self.export_recovery.note_action(action)
-        self.track.note_applied(action, applied)
+        self._last_charge_w = applied if action.is_charge else 0.0
+        self._last_discharge_w = applied if action.is_discharge else 0.0
+        self.export_recovery.note_action(action.value)
+        self.track.note_applied(action.value, applied)
+        return applied
 
-    # oude naam: switch.py en externe scripts spreken deze nog aan
-    _set_battery = set_battery
+    async def _apply_command(self, command: BatteryCommand) -> float:
+        """Enige ongearbitreerde doorgang naar een merkadapter."""
+        return await self.adapter_impl.apply(
+            command.action.value,
+            command.power_w,
+            p1_cap=command.p1_cap,
+        )
+
+    async def set_discharge_limit(
+        self,
+        power_w: float,
+        *,
+        source: CommandSource = CommandSource.REALTIME,
+    ) -> float | None:
+        """Serialiseer een snelle adapter-specifieke matching-limietwrite."""
+        command = self.command_arbiter.command(
+            BatteryAction.DISCHARGE,
+            power_w,
+            p1_cap=False,
+            source=source,
+        )
+        result = await self.command_arbiter.execute(
+            command, self._apply_limit_command)
+        return None if result.skipped else result.applied_w
+
+    async def _apply_limit_command(self, command: BatteryCommand) -> float:
+        return await self.adapter_impl.adjust_discharge_limit(command.power_w)

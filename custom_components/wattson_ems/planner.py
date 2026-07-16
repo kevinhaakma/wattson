@@ -25,11 +25,15 @@ prijsdrempel. sell_ok=False begrenst ontladen op de netto huisvraag.
 
 class Params:
     def __init__(self, **kw):
+        # Defaults spiegelen het battery-blok in params.json (de canonieke,
+        # door de trainer geëxporteerde apparaatgrenzen); dit bestand blijft
+        # bewust dependency-vrij, dus de waarden staan hier als literal.
+        # Coordinator en trainer overschrijven ze altijd expliciet.
         self.capacity_kwh = 5.76
         self.soc_min_kwh = 0.58        # 10%
         self.soc_max_kwh = 5.76
-        self.p_charge_max_w = 1600.0
-        self.p_discharge_max_w = 800.0
+        self.p_charge_max_w = 2000.0   # opties-laadlimiet Zendure 2400 AC
+        self.p_discharge_max_w = 1400.0  # inverse_max_power
         # Verliesmodel gekalibreerd op de massabalans van het echte apparaat
         # (179 u, 2026-07-07..15: 37,3 kWh in / 33,6 kWh uit / ΔSoC −0,67 =
         # 4,36 kWh verlies; model met deze waarden voorspelt 4,34). De oude
@@ -56,8 +60,8 @@ class Params:
         self.risk_k = 0.0
         self.risk_steps = ()
         self.soc_step_kwh = 0.08
-        self.charge_levels = (0.0, 400.0, 800.0, 1200.0, 1600.0)
-        self.discharge_levels = (0.0, 200.0, 400.0, 600.0, 800.0)
+        self.charge_levels = (0.0, 500.0, 1000.0, 1500.0, 2000.0)
+        self.discharge_levels = (0.0, 350.0, 700.0, 1050.0, 1400.0)
         for k, v in kw.items():
             if not hasattr(self, k):
                 raise TypeError("onbekende parameter: %s" % k)

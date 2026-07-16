@@ -1,4 +1,6 @@
 """Constanten voor Wattson — slimme thuisaccu."""
+import json
+import os
 
 DOMAIN = "wattson_ems"
 PLATFORMS = ["sensor", "switch", "select"]
@@ -9,13 +11,10 @@ CONF_ENT_SOC = "ent_soc"
 CONF_ENT_P1 = "ent_p1"
 CONF_ENT_WALLBOX_1 = "ent_wallbox_1"
 CONF_ENT_WALLBOX_2 = "ent_wallbox_2"
-# thuis-gate per EV-meting (optioneel): voertuig-telemetrie zoals
-# sensor.<auto>_charger_power meet óók laden elders (openbare lader), en de
-# EV-guard zou de accu dan onnodig blokkeren terwijl de auto niet eens thuis
-# is (incident 2026-07-14). Met een device_tracker/person/binary_sensor als
-# gate telt de bijbehorende wallbox-meting alleen mee als die entiteit
-# 'home'/'on' meldt; unknown/unavailable telt als thuis (fail-safe: liever
-# onnodig conservatief dan de auto uit de accu voeden).
+# thuis-gate per EV-meting (optioneel): voertuig-telemetrie meet óók laden
+# elders, dus de meting telt alleen mee als de gate 'home'/'on' meldt;
+# unknown/unavailable = thuis (fail-safe: liever onnodig blokkeren dan de
+# auto uit de accu voeden).
 CONF_ENT_WALLBOX_1_HOME = "ent_wallbox_1_thuis"
 CONF_ENT_WALLBOX_2_HOME = "ent_wallbox_2_thuis"
 CONF_ENT_PV_NOW = "ent_pv_now"
@@ -29,8 +28,8 @@ CONF_ENT_ZD_DIS = "ent_zd_dis"
 CONF_ENT_ZD_INLIM = "ent_zd_inlim"    # number.*_input_limit (max laadvermogen)
 CONF_ENT_ZD_OUTLIM = "ent_zd_outlim"  # number.*_output_limit (max ontlaadvermogen)
 # select.*_ac_mode: moet 'input' zijn om AC te laden en 'output' om te
-# ontladen; de Zendure-manager zet dit niet betrouwbaar zelf (incident
-# 2026-07-09 en 2026-07-10: accu laadde niet omdat ac_mode op output bleef)
+# ontladen; de Zendure-manager zet dit niet betrouwbaar zelf, dus de
+# adapter stuurt hem mee
 CONF_ENT_ZD_ACMODE = "ent_zd_acmode"
 
 # ---------- adapter (accumerk) ----------
@@ -74,6 +73,27 @@ CONF_ENT_EXPORT_TOTALS = "ent_export_totalen"
 CONF_WEDGE_POST = "wedge_post_saldering"
 
 # ---------- defaults ----------
+# Accu-defaults komen uit het battery-blok van params.json: dat blok wordt
+# door de trainer geëxporteerd en is de enige bron van waarheid voor de
+# apparaatgrenzen. Voorheen liepen const.py (1600/800) en params.json
+# (2000/1400, de getrainde apparaat-realiteit) stil uiteen, waardoor een
+# verse wizard-installatie niet-getrainde limieten kreeg.
+def _battery_defaults() -> dict:
+    path = os.path.join(os.path.dirname(__file__), "params.json")
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)["battery"]
+    except (OSError, ValueError, KeyError):
+        return {}
+
+
+_BAT = _battery_defaults()
+_BAT_CAPACITY = float(_BAT.get("capacity_kwh", 5.76))
+_BAT_MIN_SOC_PCT = round(
+    float(_BAT.get("soc_min_kwh", 0.58)) / _BAT_CAPACITY * 100.0) if _BAT_CAPACITY else 10
+_BAT_P_CHARGE = float(_BAT.get("p_charge_max_w", 2000.0))
+_BAT_P_DISCHARGE = float(_BAT.get("p_discharge_max_w", 1400.0))
+
 # Bewust géén entity-id's: elke installatie kiest zijn eigen bronnen in de
 # setup-wizard / options-flow. Een lege waarde betekent "niet geconfigureerd";
 # de coordinator behandelt lege entiteiten als afwezig.
@@ -105,10 +125,10 @@ DEFAULT_OPTIONS = {
     CONF_ENT_MS_DISCHARGE: "",
     CONF_ENT_BAT_CHG: "",
     CONF_ENT_BAT_DIS: "",
-    CONF_CAPACITY: 5.76,
-    CONF_MIN_SOC_PCT: 10,
-    CONF_P_CHARGE: 1600,
-    CONF_P_DISCHARGE: 800,
+    CONF_CAPACITY: _BAT_CAPACITY,
+    CONF_MIN_SOC_PCT: _BAT_MIN_SOC_PCT,
+    CONF_P_CHARGE: _BAT_P_CHARGE,
+    CONF_P_DISCHARGE: _BAT_P_DISCHARGE,
     CONF_WEDGE_POST: 0.10,
     CONF_ENT_IMPORT_TOTALS: [],
     CONF_ENT_EXPORT_TOTALS: [],
@@ -137,20 +157,14 @@ DISCHARGE_EXPORT_ABORT_W = 150    # bronexport die zelfs bij het volledige nog
                                   # niet gemeten ontlaadcommando overblijft
 DISCHARGE_EXPORT_ABORT_HOLD_S = 15  # bevestig over meerdere P1-updates; normale
                                     # smart-charge-regelruis bleef binnen ±124 W
-ASSIST_STOP_GRACE_S = 150  # "piek/overschot voorbij" moet zo lang aanhouden
-                           # voordat de assist echt stopt: vangt wolk-dips en
-                           # stale telemetrie af zonder relais-gecycle; native
-                           # matching moduleert in de tussentijd zelf al mee
-ASSIST_MIN_RUN_S = 180     # opwarmtijd na assist-start: de accutelemetrie
-                           # (60s-poll, write-on-change) loopt achter op het
-                           # apparaat, dus "piek/overschot voorbij" is in dit
-                           # venster geen geldig stopbewijs (harde stops zoals
-                           # SoC-vol, EV en reserve blijven wél direct gelden)
-# demping laden <-> overschotladen (zelfde advies, dus buiten de gewone
-# wisseldrempel): demotie naar vast netladen alleen als het overschot het
-# geplande vermogen dit hele venster niet heeft kunnen dragen (piek-geheugen —
-# een wolkgat op het tick-moment is geen bewijs; 14:35-incident: demotie en
-# 23 s later alweer promotie).
+ASSIST_STOP_GRACE_S = 150  # "voorbij" moet zo lang aanhouden vóór echt stoppen:
+                           # vangt wolk-dips en stale telemetrie af zonder gecycle
+ASSIST_MIN_RUN_S = 180     # opwarmtijd na assist-start: accutelemetrie (60s-poll)
+                           # loopt achter, dus "voorbij" is hier geen stopbewijs;
+                           # harde stops (SoC-vol, EV) blijven wél direct gelden
+# demping laden <-> overschotladen: demotie naar vast netladen alleen als het
+# overschot het geplande vermogen dit hele venster niet droeg (piek-geheugen;
+# een wolkgat op het tick-moment is geen bewijs)
 SURPLUS_DEMOTE_WINDOW_S = 300
 SURPLUS_DEMOTE_MARGIN_W = 300
 UPDATE_MINUTES = 10        # her-plan interval; realtime werk (bijspringen,
@@ -163,11 +177,9 @@ DAGLICHT = (7, 21)         # uren waarbinnen de PV-bel wordt verdeeld
 WATCH_FRESH_S = 180        # meetwaarde ouder dan dit telt niet als bewijs
 WATCH_RUNAWAY_W = 300      # accuvermogen boven dit zonder opdracht = runaway
 GEENDATA_STOP_S = 600      # telemetrie zo lang stil met sturing aan -> veilig stoppen
-# na een eigen stopcommando blijft het apparaat nog even actief (cloud-
-# latentie); zolang de grace loopt is de zojuist gestopte richting geen
-# runaway (incident 2026-07-10 14:53: assist stopte bij wolk, watchdog zag
-# de uitlopende 1592 W laden als runaway en tripte onnodig)
-WATCH_STOP_GRACE_S = 45
+WATCH_STOP_GRACE_S = 45    # na een eigen stopcommando loopt het apparaat door
+                           # cloud-latentie nog even uit; binnen de grace is de
+                           # zojuist gestopte richting geen runaway
 
 # Volgen van de gemeten vraag. Asymmetrisch, want de twee richtingen hebben
 # verschillende urgentie:
@@ -179,17 +191,15 @@ WATCH_STOP_GRACE_S = 45
 #   en op vaste adapters remt de discharge-guard direct bij export).
 TRACK_INTERVAL_S = 30      # trage lus: terugnemen + surplus-promotie
 TRACK_FAST_THROTTLE_S = 2  # snelle lus: minimale tijd tussen twee ophogingen
-TRACK_DEADBAND_W = 40      # restimport onder deze band niet najagen; 40 W ligt
-                           # onder Zendure's 50 W startstap, terwijl de 25 W
-                           # export-guard een eventuele overshoot direct remt
-SETPOINT_ACK_DEADBAND_W = 25  # vast setpoint geldt als fysiek bereikt binnen
-                              # deze tolerantie; blokkeert asynchrone P1/accu-
-                              # combinaties tijdens Zendure-cloudlatentie
+TRACK_DEADBAND_W = 40      # restimport onder deze band niet najagen (onder de
+                           # 50 W apparaat-startstap; export-guard remt overshoot)
+SETPOINT_ACK_DEADBAND_W = 25  # vast setpoint geldt als fysiek bereikt binnen deze
+                              # tolerantie (P1/accu lopen asynchroon bij cloudlatentie)
 TRACK_MARGE_W = 150        # limiet iets boven de vraag zodat matching kan ademen
-TRACK_LOWER_GRACE_S = 180  # terugnemen volgt de PIEK-vraag van de laatste 3 min:
-                           # direct na matching leest P1 ~0 en de ontlaadmeting
-                           # loopt achter, waardoor de kale momentvraag oscilleert
-                           # en elke limiet-write het apparaat kort herstart
+TRACK_LOWER_GRACE_S = 180  # terugnemen volgt de PIEK-vraag van dit venster:
+                           # de kale momentvraag oscilleert (P1 ~0 na matching,
+                           # ontlaadmeting loopt achter) en elke limiet-write
+                           # herstart het apparaat kort
 
 # discharge-guard (marstek/generic): het ontlaad-setpoint is daar een vast
 # vermogen; zakt de huisvraag, dan verlaagt deze altijd-actieve bewaking het
@@ -216,14 +226,14 @@ EV_SUSPECT_JUMP_W = 3000
 # agressiviteit = de knop op de doelfunctie. pref (= alpha = beta, €/kWh) is
 # de zelfvoorzienings-voorkeur: hoe duurder import/hoe onaantrekkelijker
 # export in het planningsdoel. deg is het bijbehorende plannings-
-# slijtagegewicht. Combinaties komen uit de grid-search (backtest 95 dgn,
-# saldering / 2027): agressief €172/€168 pj bij 22,7/35,0% zelfvoorziening,
-# gebalanceerd €165/€166 bij 27,3/37,7%, rustig €140/€159 bij 33,2/39,4%.
-# beta = extra export-korting bovenop pref (asymmetrie): beprijst
-# centen-trades (reserve verkopen om hem uren later terug te kopen) zonder
-# huisdekking te raken. Backtest 95 dgn saldering: agressief €172/23,0%,
-# gebalanceerd €158/29,8% (−€7 t.o.v. symmetrisch, −0,33 kWh/dag export),
-# rustig €116/37,5%.
+# slijtagegewicht; beta = extra export-korting bovenop pref (asymmetrie):
+# beprijst centen-trades (reserve verkopen om hem uren later terug te kopen)
+# zonder huisdekking te raken. Combinaties komen uit de grid-search
+# (hertraind 2026-07-16 op de EV-geschoonde dataset, 95 dgn, saldering / 2027):
+# agressief €166/€174 pj bij 41,6/59,1% zelfvoorziening,
+# gebalanceerd €153/€169 bij 52,3/63,0%, rustig €119/€163 bij 61,6/65,7%.
+# (De oude, veel lagere zelfvoorzieningscijfers telden onherkende EV-nachten
+# als huislast mee.)
 AGGRO_LEVELS = {
     "rustig": {"pref": 0.05, "beta_extra": 0.04, "deg": 0.02, "risk": 0.10},
     "gebalanceerd": {"pref": 0.02, "beta_extra": 0.02, "deg": 0.02, "risk": 0.05},

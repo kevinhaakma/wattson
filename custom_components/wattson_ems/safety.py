@@ -40,9 +40,8 @@ class Safety:
         # assist_active is de stuurwaarheid. Het advies kan tijdens een
         # gelijktijdige plan-tick kort veranderen en mag de watchdog dan niet
         # laten ingrijpen tegen een actie die Wattson zelf nog beheert.
-        chg = c.advies in ("laden", "bijspringen: laden") or c.assist_active == "laden"
-        dis = (c.advies in ("ontladen", "verkopen", "bijspringen: ontladen")
-               or c.assist_active == "ontladen")
+        chg = c.mode.expects_charge or c.assist_active == "laden"
+        dis = c.mode.expects_discharge or c.assist_active == "ontladen"
         return chg, dis
 
     async def watchdog(self) -> None:
@@ -105,12 +104,8 @@ class Safety:
                     "name": "Wattson", "message": "WATCHDOG opgeheven, sturing hervat",
                     "entity_id": "sensor.wattson_advies", "domain": "wattson_ems"})
                 # direct herplannen: tijdens de trip weigerde de adapter elk
-                # commando, dus het staande advies is nooit uitgevoerd. Zonder
-                # her-tick blijft de sturing tot de volgende plan-tick (10 min)
-                # dood staan (incident 2026-07-15: 2× na HA-herstart — apparaat
-                # liep nog op het pre-restart-commando, watchdog tripte op
-                # "laadt terwijl 'geen data'", opheffing volgde maar niets
-                # voerde het plan alsnog uit).
+                # commando, dus het staande advies is nooit uitgevoerd; zonder
+                # her-tick blijft de sturing tot de volgende plan-tick dood
                 c.hass.async_create_task(c._tick(None))
 
     async def stale_guard(self) -> None:

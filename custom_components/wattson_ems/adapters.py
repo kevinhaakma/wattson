@@ -138,7 +138,7 @@ def export_recovery_state(source_p1_w: float, *, threshold_w: float,
     return since, now_s - since >= hold_s
 
 
-async def set_number(hass, entity: str, value) -> None:
+async def set_number(hass, entity: str, value, *, force: bool = False) -> None:
     """Zet een number-entity, geclampt op haar eigen min/max.
 
     Het apparaat bepaalt zijn eigen grenzen (bv. output_limit max 1400 W);
@@ -158,10 +158,14 @@ async def set_number(hass, entity: str, value) -> None:
                 value = max(float(value), float(lo))
         except (TypeError, ValueError):
             pass
-        # ongewijzigd = niet schrijven: elke write herstart de regelaar van
-        # het apparaat kort (zichtbaar als ~40 s idle-dip + relais-tik)
+        # ongewijzigd = normaal niet schrijven: elke write herstart de regelaar
+        # van het apparaat kort (zichtbaar als ~40 s idle-dip + relais-tik).
+        # Na een modewissel kan een identieke manual-waarde juist wél nodig
+        # zijn om een eerder hard dichtgezette richting opnieuw te activeren.
         try:
-            if math.isclose(float(st.state), float(value), rel_tol=1e-3, abs_tol=1e-3):
+            if (not force
+                    and math.isclose(float(st.state), float(value),
+                                     rel_tol=1e-3, abs_tol=1e-3)):
                 return
         except (TypeError, ValueError):
             pass
@@ -169,7 +173,8 @@ async def set_number(hass, entity: str, value) -> None:
         "number", "set_value", {"entity_id": entity, "value": value}, blocking=True)
 
 
-async def set_power_number(hass, entity: str, watts: float) -> None:
+async def set_power_number(
+        hass, entity: str, watts: float, *, force: bool = False) -> None:
     """Zet een number-vermogensentity, ongeacht of die W, kW of MW gebruikt."""
     unit = unit_of(hass, entity)
     native = watts
@@ -177,7 +182,7 @@ async def set_power_number(hass, entity: str, watts: float) -> None:
         native = watts / 1000.0
     elif unit == "mw":
         native = watts / 1_000_000.0
-    await set_number(hass, entity, native)
+    await set_number(hass, entity, native, force=force)
 
 
 # ---------------------------------------------------------------------------
@@ -237,6 +242,14 @@ class BatteryAdapter:
     async def emergency_stop(self, richting) -> None:
         return None
 
+    async def adjust_discharge_limit(self, power_w: float) -> float:
+        """Pas alleen de realtime ontlaadruimte aan.
+
+        Adapters zonder aparte matching-limiet vallen terug op een normaal
+        vast ontlaadcommando. Zendure overschrijft dit met zijn outputLimit.
+        """
+        return await self.apply("ontladen", power_w, p1_cap=False)
+
     async def enforce_rest(self) -> None:
         return None
 
@@ -274,6 +287,10 @@ class ZendureAdapter(BatteryAdapter):
     herhaald 10--40 s nulvermogen. Native smart_charging blijft beschikbaar
     voor PV-overschot. Noodstops zetten de target van de foute richting dicht.
     """
+
+    async def adjust_discharge_limit(self, power_w: float) -> float:
+        await set_power_number(self.c.hass, self.c.ent_zd_outlim, power_w)
+        return power_w
 
     name = "zendure"
     caps = AdapterCaps(p1_matching=False, device_limits=True, surplus_mode=True,
@@ -343,7 +360,7 @@ class ZendureAdapter(BatteryAdapter):
         c = self.c
         # ac_mode zelf meesturen: het apparaat laadt alleen via AC als de
         # ac_mode op 'input' staat en ontlaadt alleen op 'output'; de
-        # Zendure-manager zet dit niet betrouwbaar (incidenten 9 en 10 juli).
+        # Zendure-manager zet dit niet betrouwbaar zelf.
         # Bij 'off' blijft de stand staan — geen richtingswissel nodig.
         if c.ent_zd_acmode:
             gewenst = None
@@ -363,9 +380,14 @@ class ZendureAdapter(BatteryAdapter):
         # limiet-pingpong en herstarts. Alleen rust/noodstop gebruikt ze nog als
         # harde directionele stop; een volgende manageractie opent de richting.
         cur = c.hass.states.get(c.ent_zd_operation)
+        mode_changed = cur is None or cur.state != mode
         if mode == "manual":
-            await set_power_number(c.hass, c.ent_zd_manual, manual_w)
-        if cur is None or cur.state != mode:
+            # Een stop/noodstop laat manual_power bewust staan maar zet de
+            # fysieke richting dicht. Bij terugkeer naar manual moet dezelfde
+            # waarde daarom opnieuw door de Zendure-manager verwerkt worden.
+            await set_power_number(
+                c.hass, c.ent_zd_manual, manual_w, force=mode_changed)
+        if mode_changed:
             await c.hass.services.async_call(
                 "select", "select_option",
                 {"entity_id": c.ent_zd_operation, "option": mode}, blocking=True)

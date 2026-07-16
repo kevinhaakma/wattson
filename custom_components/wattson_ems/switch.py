@@ -8,6 +8,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.restore_state import RestoreEntity
 
 from .const import DOMAIN
+from .control import AdviceMode, BatteryAction, CommandSource, Decision
 from .entity import wattson_device_info
 
 
@@ -55,11 +56,14 @@ class WattsonControlSwitch(SwitchEntity, RestoreEntity):
         self._attr_is_on = False
         self.async_write_ha_state()
         # bij uitzetten: accu in veilige ruststand
-        await self.coordinator._set_battery("rust", 0.0)
+        self.coordinator.command_arbiter.invalidate_pending()
+        await self.coordinator.set_battery(
+            BatteryAction.IDLE, 0.0, source=CommandSource.USER)
         if was_assisting:
-            self.coordinator.advies = "rust"
-            self.coordinator.setpoint_w = 0.0
-            self.coordinator.reden = "sturing uitgezet — assist gestopt"
+            self.coordinator.set_decision(Decision(
+                AdviceMode.IDLE,
+                reason="sturing uitgezet — assist gestopt",
+            ))
 
 
 class WattsonAssistSwitch(SwitchEntity, RestoreEntity):
@@ -91,10 +95,13 @@ class WattsonAssistSwitch(SwitchEntity, RestoreEntity):
         self.async_write_ha_state()
         if self.coordinator.assist_active:
             self.coordinator.assist_active = None
-            await self.coordinator._set_battery("rust", 0.0)
-            self.coordinator.advies = "rust"
-            self.coordinator.setpoint_w = 0.0
-            self.coordinator.reden = "bijspringen uitgezet"
+            self.coordinator.command_arbiter.invalidate_pending()
+            await self.coordinator.set_battery(
+                BatteryAction.IDLE, 0.0, source=CommandSource.USER)
+            self.coordinator.set_decision(Decision(
+                AdviceMode.IDLE,
+                reason="bijspringen uitgezet",
+            ))
 
 
 class WattsonSellSwitch(SwitchEntity, RestoreEntity):
@@ -125,5 +132,5 @@ class WattsonSellSwitch(SwitchEntity, RestoreEntity):
         self.coordinator.sell_enabled = False
         self._attr_is_on = False
         self.async_write_ha_state()
-        if self.coordinator.advies == "verkopen":
+        if self.coordinator.mode is AdviceMode.SELL:
             await self.coordinator._tick(None)  # herplannen zonder verkoop

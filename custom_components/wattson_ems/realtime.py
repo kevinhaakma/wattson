@@ -41,6 +41,7 @@ from .const import (
     TRACK_LOWER_GRACE_S,
     TRACK_MARGE_W,
 )
+from .control import AdviceMode, BatteryAction, CommandSource, Decision
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -147,7 +148,9 @@ class TrackController:
                 if bron_export > c._last_charge_w + 300:
                     self._fast_last = now
                     c.hass.async_create_task(c.set_battery(
-                        "laden_overschot", max(c._last_charge_w, 0.0)))
+                        BatteryAction.SURPLUS_CHARGE,
+                        max(c._last_charge_w, 0.0),
+                        source=CommandSource.REALTIME))
             return
         vraag = self.discharge_target()
         if vraag is None:
@@ -167,10 +170,13 @@ class TrackController:
     async def _apply(self, doel_w: float) -> None:
         c = self.c
         if c.caps.p1_matching:
-            await A.set_power_number(c.hass, c.ent_zd_outlim, doel_w)
-            self.tracked_outlim = doel_w
+            applied = await c.set_discharge_limit(doel_w)
+            if applied is not None:
+                self.tracked_outlim = applied
         else:
-            await c.set_battery("ontladen", doel_w, p1_cap=False)
+            await c.set_battery(
+                BatteryAction.DISCHARGE, doel_w, p1_cap=False,
+                source=CommandSource.REALTIME)
 
     # ---------- trage lus (interval) ----------
     async def tick(self, _now) -> None:
@@ -217,12 +223,15 @@ class TrackController:
                 doel = min(max(vraag_eff + TRACK_MARGE_W, c.caps.min_setpoint_w),
                            c.params.p_discharge_max_w)
                 if doel <= self.tracked_outlim - TRACK_DEADBAND_W:
-                    await A.set_power_number(c.hass, c.ent_zd_outlim, doel)
-                    self.tracked_outlim = doel
+                    applied = await c.set_discharge_limit(doel)
+                    if applied is not None:
+                        self.tracked_outlim = applied
             else:
                 doel = min(vraag_eff, c.params.p_discharge_max_w)
                 if doel <= c._last_discharge_w - TRACK_DEADBAND_W:
-                    await c.set_battery("ontladen", doel, p1_cap=False)
+                    await c.set_battery(
+                        BatteryAction.DISCHARGE, doel, p1_cap=False,
+                        source=CommandSource.REALTIME)
         elif act == "laden" and c.caps.surplus_mode:
             p1 = c.t.fresh_power_w(c.ent_p1, 90)
             if p1 is None:
@@ -232,7 +241,10 @@ class TrackController:
             chg_now = chg if chg is not None else c._last_charge_w
             bron_export = -A.p1_without_battery(p1, charge_w=chg_now)
             if bron_export > c._last_charge_w + 300:
-                await c.set_battery("laden_overschot", max(c._last_charge_w, 0.0))
+                await c.set_battery(
+                    BatteryAction.SURPLUS_CHARGE,
+                    max(c._last_charge_w, 0.0),
+                    source=CommandSource.REALTIME)
 
 
 class DischargeGuard:
@@ -254,7 +266,8 @@ class DischargeGuard:
         c = self.c
         if c.caps.p1_matching or not c.control_enabled:
             return
-        if c._last_discharge_w <= 0 or c.advies not in ("ontladen", "bijspringen: ontladen"):
+        if c._last_discharge_w <= 0 or c.mode not in (
+                AdviceMode.DISCHARGE, AdviceMode.ASSIST_DISCHARGE):
             return
         now = time.monotonic()
         if now - self._last < DIS_GUARD_THROTTLE_S:
@@ -277,7 +290,9 @@ class DischargeGuard:
     async def _apply(self, allowed_w: float) -> None:
         c = self.c
         prev_w = c._last_discharge_w
-        await c.set_battery("ontladen", allowed_w, p1_cap=False)
+        await c.set_battery(
+            BatteryAction.DISCHARGE, allowed_w, p1_cap=False,
+            source=CommandSource.REALTIME)
         _LOGGER.debug("Wattson discharge-guard: ontladen %0.f -> %.0f W", prev_w, allowed_w)
         c.write_entities()
 
@@ -308,7 +323,7 @@ class ExportRecovery:
             and not c.safety.tripped
             and c.caps.surplus_mode
             and c._last_action == "ontladen"
-            and c.advies in ("ontladen", "bijspringen: ontladen")
+            and c.mode in (AdviceMode.DISCHARGE, AdviceMode.ASSIST_DISCHARGE)
         )
         if not active:
             self.since = None
@@ -380,23 +395,33 @@ class ExportRecovery:
             # de tegengestelde richting openen.
             c.assist_active = None
             c.assist.end_since = None
-            await c.set_battery("rust", 0.0)
+            stopped = await c.set_battery(
+                BatteryAction.IDLE, 0.0, source=CommandSource.REALTIME)
+            if stopped is None:
+                return
             if can_store and charge_economic:
                 target = min(max(-source_p1, c.caps.min_setpoint_w),
                              c.params.p_charge_max_w)
-                await c.set_battery("laden_overschot", target)
+                applied = await c.set_battery(
+                    BatteryAction.SURPLUS_CHARGE, target,
+                    source=CommandSource.REALTIME)
+                if applied is None:
+                    return
                 c.assist_active = "laden"
                 c.assist.started = time.monotonic()
-                c.advies = "bijspringen: laden"
-                c.setpoint_w = round(c._last_charge_w)
-                c.reden = (f"sterke bronexport {-source_p1:.0f} W bevestigd — "
-                           "ontladen afgebroken en overschotladen hervat")
+                c.set_decision(Decision(
+                    AdviceMode.ASSIST_CHARGE,
+                    round(c._last_charge_w),
+                    f"sterke bronexport {-source_p1:.0f} W bevestigd — "
+                    "ontladen afgebroken en overschotladen hervat",
+                ))
             else:
-                c.advies = "rust"
-                c.setpoint_w = 0.0
                 waarom = "accu vrijwel vol" if not can_store else "opslaan niet economisch"
-                c.reden = (f"sterke bronexport {-source_p1:.0f} W bevestigd — "
-                           f"ontladen afgebroken ({waarom})")
+                c.set_decision(Decision(
+                    AdviceMode.IDLE,
+                    reason=f"sterke bronexport {-source_p1:.0f} W bevestigd — "
+                    f"ontladen afgebroken ({waarom})",
+                ))
             c.log_decision(prev)
             c.write_entities()
         finally:
@@ -433,7 +458,7 @@ class AssistController:
         c = self.c
         if not (c.control_enabled and c.assist_enabled):
             return
-        if c.advies not in ("rust", "rust (EV-guard)") and not c.assist_active:
+        if c.mode not in (AdviceMode.IDLE, AdviceMode.EV_GUARD) and not c.assist_active:
             return
         now = time.monotonic()
         if now - self._last < ASSIST_THROTTLE_S:
@@ -523,26 +548,34 @@ class AssistController:
                 peak_ended or vrij_dis <= 0 or c.ev.charging()
                 or not discharge_worth):
             c.assist_active = None
-            await c.set_battery("rust", 0.0)
-            c.advies = "rust"
-            c.setpoint_w = 0.0
-            c.reden = ("bijspringen klaar (piek voorbij)" if peak_ended
-                       else "bijspringen klaar (bewaren is weer waardevoller)")
+            await c.set_battery(
+                BatteryAction.IDLE, 0.0, source=CommandSource.REALTIME)
+            c.set_decision(Decision(
+                AdviceMode.IDLE,
+                reason=("bijspringen klaar (piek voorbij)" if peak_ended
+                        else "bijspringen klaar (bewaren is weer waardevoller)"),
+            ))
         elif c.assist_active == "laden" and (
                 surplus_ended or charge_full or not charge_worth):
             c.assist_active = None
-            await c.set_battery("rust", 0.0)
-            c.advies = "rust"
-            c.setpoint_w = 0.0
-            c.reden = ("bijspringen klaar (maximale SoC bereikt)" if charge_full
-                       else "bijspringen klaar (overschot voorbij of accu vol genoeg)")
+            await c.set_battery(
+                BatteryAction.IDLE, 0.0, source=CommandSource.REALTIME)
+            c.set_decision(Decision(
+                AdviceMode.IDLE,
+                reason=("bijspringen klaar (maximale SoC bereikt)" if charge_full
+                        else "bijspringen klaar (overschot voorbij of accu vol genoeg)"),
+            ))
         elif c.assist_active == "ontladen":
             if source_p1 is None:
                 return
             target = min(max(source_p1, 0.0), c.params.p_discharge_max_w)
             if abs(target - c._last_discharge_w) < ASSIST_POWER_DEADBAND_W:
                 return
-            await c.set_battery("ontladen", target, p1_cap=False)
+            applied = await c.set_battery(
+                BatteryAction.DISCHARGE, target, p1_cap=False,
+                source=CommandSource.REALTIME)
+            if applied is None:
+                return
             c.setpoint_w = -round(c._last_discharge_w)
             c.reden = f"piek volgt bronvraag {source_p1:.0f} W"
         elif c.assist_active == "laden":
@@ -554,28 +587,45 @@ class AssistController:
             target = min(max(-source_p1, 0.0), c.params.p_charge_max_w)
             if abs(target - c._last_charge_w) < ASSIST_POWER_DEADBAND_W:
                 return
-            await c.set_battery("laden", target)
+            applied = await c.set_battery(
+                BatteryAction.CHARGE, target, source=CommandSource.REALTIME)
+            if applied is None:
+                return
             c.setpoint_w = round(c._last_charge_w)
             c.reden = f"zonoverschot volgt bronexport {-source_p1:.0f} W"
         elif (p1 > ASSIST_IMPORT_W and discharge_worth
               and not c.ev.charging() and vrij_dis > 0):
+            applied = await c.set_battery(
+                BatteryAction.DISCHARGE,
+                min(p1, c.params.p_discharge_max_w),
+                source=CommandSource.REALTIME)
+            if applied is None:
+                return
             c.assist_active = "ontladen"
             self.started = time.monotonic()
             self.end_since = None
-            await c.set_battery("ontladen", min(p1, c.params.p_discharge_max_w))
-            c.advies = "bijspringen: ontladen"
-            c.setpoint_w = -round(c._last_discharge_w)
-            c.reden = (f"piek {p1:.0f} W: dekken is €{dek_waarde:.3f}/kWh waard, "
-                       f"bewaren €{floor:.3f}")
+            c.set_decision(Decision(
+                AdviceMode.ASSIST_DISCHARGE,
+                -round(c._last_discharge_w),
+                f"piek {p1:.0f} W: dekken is €{dek_waarde:.3f}/kWh waard, "
+                f"bewaren €{floor:.3f}",
+            ))
         elif p1 < -ASSIST_EXPORT_W and not charge_full and charge_worth:
+            applied = await c.set_battery(
+                BatteryAction.SURPLUS_CHARGE,
+                min(-p1, c.params.p_charge_max_w),
+                source=CommandSource.REALTIME)
+            if applied is None:
+                return
             c.assist_active = "laden"
             self.started = time.monotonic()
             self.end_since = None
-            await c.set_battery("laden_overschot", min(-p1, c.params.p_charge_max_w))
-            c.advies = "bijspringen: laden"
-            c.setpoint_w = round(c._last_charge_w)
-            c.reden = (f"zonoverschot {-p1:.0f} W: opslaan is tot €{ceil:.3f}/kWh "
-                       f"waard, exporteren levert €{exportprijs - c.params.beta:.3f}")
+            c.set_decision(Decision(
+                AdviceMode.ASSIST_CHARGE,
+                round(c._last_charge_w),
+                f"zonoverschot {-p1:.0f} W: opslaan is tot €{ceil:.3f}/kWh "
+                f"waard, exporteren levert €{exportprijs - c.params.beta:.3f}",
+            ))
         else:
             return
         c.log_decision(prev)
