@@ -34,13 +34,16 @@ class WattsonAggroSelect(SelectEntity, RestoreEntity):
         if last and last.state in AGGRO_LEVELS:
             self._attr_current_option = last.state
         self._apply()
+        # restore-race: de eerste plan-tick kan al met default-parameters
+        # gedraaid hebben — herplan met de zojuist herstelde stand
+        self.hass.async_create_task(self.coordinator._tick(None))
 
     def _apply(self):
         level = AGGRO_LEVELS[self._attr_current_option]
         # de doelfunctie-knop: zelfvoorzienings-voorkeur, slijtagegewicht
         # en onzekerheids-discount ("bij twijfel wint het huis nú")
         self.coordinator.params.alpha = level["pref"]
-        self.coordinator.params.beta = level["pref"]
+        self.coordinator.params.beta = level["pref"] + level["beta_extra"]
         self.coordinator.params.deg_cost = level["deg"]
         self.coordinator.params.risk_k = level["risk"]
         self.coordinator.aggressiveness = self._attr_current_option

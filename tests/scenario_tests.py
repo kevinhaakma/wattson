@@ -30,6 +30,20 @@ def main():
           and abs(sc.export_price(0.30, na) - 0.20) < 1e-9)
     check("exportprijs blijft boven de vloer", sc.export_price(-0.60, na) == -0.5)
 
+    # jaarsaldering-bewaking: wedge schuift mee met de resterende ruimte
+    sc.netting_headroom_kwh = 500.0
+    check("ruime jaarpositie: volle saldering-wedge", sc.wedge(voor) == 0.00)
+    sc.netting_headroom_kwh = 150.0
+    check("halve blend-marge: wedge halverwege",
+          abs(sc.wedge(voor) - 0.05) < 1e-9)
+    sc.netting_headroom_kwh = 0.0
+    check("ruimte op: post-saldering-wedge", sc.wedge(voor) == 0.10)
+    sc.netting_headroom_kwh = -50.0
+    check("netto-exporteur: wedge klemt op post", sc.wedge(voor) == 0.10)
+    sc.netting_headroom_kwh = 0.0
+    check("na saldering-einde telt de positie niet meer", sc.wedge(na) == 0.10)
+    sc.netting_headroom_kwh = None
+
     check("geen waarschuwing ver voor de overgang",
           sc.transition_warning(date(2026, 7, 15)) is None)
     check("waarschuwing in de aanloop",
@@ -39,7 +53,7 @@ def main():
     check("waarschuwing dooft daarna",
           sc.transition_warning(date(2027, 6, 1)) is None)
 
-    print("\n8/8 PASS")
+    print("\n13/13 PASS")
 
 
 if __name__ == "__main__":

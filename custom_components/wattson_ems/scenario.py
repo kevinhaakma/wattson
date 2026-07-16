@@ -13,17 +13,32 @@ from datetime import date
 
 SALDERING_EINDE = date(2027, 1, 1)
 WAARSCHUW_DAGEN = 60
+# glijdende overgang: onder deze resterende jaarruimte (import − export, kWh)
+# schuift de wedge lineair van saldering naar post-saldering — export boven de
+# jaarsom import krijgt immers maar de kale prijs, niet het volle tarief
+NETTING_BLEND_KWH = 300.0
 
 
 class PriceScenario:
-    """Datum-bewuste exportprijs-logica (saldering -> post-saldering)."""
+    """Datum-bewuste exportprijs-logica (saldering -> post-saldering).
+
+    Houdt ook de jaarsaldering-positie bij (via netting.NettingMonitor,
+    gezet door de coordinator): raakt de netto-importruimte op, dan is de
+    marginale geëxporteerde kWh feitelijk al een post-salderings-kWh."""
 
     def __init__(self, wedge_saldering: float, wedge_post: float) -> None:
         self.wedge_saldering = wedge_saldering
         self.wedge_post = wedge_post
+        self.netting_headroom_kwh: float | None = None
 
     def wedge(self, today: date) -> float:
-        return self.wedge_saldering if today < SALDERING_EINDE else self.wedge_post
+        if today >= SALDERING_EINDE:
+            return self.wedge_post
+        h = self.netting_headroom_kwh
+        if h is None:
+            return self.wedge_saldering
+        factor = max(0.0, min(h / NETTING_BLEND_KWH, 1.0))
+        return self.wedge_post + (self.wedge_saldering - self.wedge_post) * factor
 
     def label(self, today: date) -> str:
         return "saldering" if today < SALDERING_EINDE else "geen saldering"

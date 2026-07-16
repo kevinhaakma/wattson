@@ -70,6 +70,8 @@ from .const import (
     CONF_ENT_ZD_MANUAL,
     CONF_ENT_ZD_OPERATION,
     CONF_ENT_ZD_OUTLIM,
+    CONF_ENT_EXPORT_TOTALS,
+    CONF_ENT_IMPORT_TOTALS,
     CONF_MIN_SOC_PCT,
     CONF_P_CHARGE,
     CONF_P_DISCHARGE,
@@ -87,6 +89,7 @@ from .const import (
 )
 from .ev import EvMonitor
 from .forecast import LoadProfile, PvCurve
+from .netting import NettingMonitor
 from .realtime import (
     AssistController,
     DischargeGuard,
@@ -177,6 +180,9 @@ class WattsonCoordinator:
             wedge_saldering=cfg["wedge"],
             wedge_post=float(o(CONF_WEDGE_POST)),
         )
+        self.netting = NettingMonitor(
+            hass, list(o(CONF_ENT_IMPORT_TOTALS) or []),
+            list(o(CONF_ENT_EXPORT_TOTALS) or []))
         self.values = PlanValues(self.params)
         self.safety = Safety(self)
         self.track = TrackController(self)
@@ -415,6 +421,10 @@ class WattsonCoordinator:
         hours = [dt for dt, _ in prices]
         pv = self.pv.curve(hours)
         today = dt_util.now().date()
+        # jaarsaldering-positie verversen (throttled): raakt de netto-
+        # importruimte op, dan schuift de wedge richting post-saldering
+        await self.netting.refresh()
+        self.scenario.netting_headroom_kwh = self.netting.headroom_kwh
         wedge = self.scenario.wedge(today)
         ev_now = self.ev.charging()
         # v1.9: de harde EV-blokkade in de planner (hour_result: p=0) geldt
@@ -487,7 +497,10 @@ class WattsonCoordinator:
             "verkopen_actief": self.sell_enabled,
             "voorkeur_zelfvoorziening_eur_kwh": self.params.alpha,
             "scenario": self.scenario.label(today),
+            "wedge_effectief": round(wedge, 3),
         }
+        if self.netting.configured and self.netting.headroom_kwh is not None:
+            self.inputs["salderingsruimte_kwh"] = round(self.netting.headroom_kwh)
         warning = self.scenario.transition_warning(today)
         if warning:
             self.inputs["scenario_waarschuwing"] = warning

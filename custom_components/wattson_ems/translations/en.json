@@ -54,7 +54,9 @@
           "min_soc_pct": "Minimum state of charge (%)",
           "p_charge_max_w": "Maximum charge power (W)",
           "p_discharge_max_w": "Maximum discharge power (W)",
-          "wedge_post_saldering": "Export price discount after net-metering ends (EUR/kWh, from 2027)"
+          "wedge_post_saldering": "Export price discount after net-metering ends (EUR/kWh, from 2027)",
+          "ent_import_totalen": "Grid import total counters (yearly netting guard, optional)",
+          "ent_export_totalen": "Grid export total counters (yearly netting guard, optional)"
         }
       }
     },
@@ -105,7 +107,9 @@
           "ent_ms_mode": "Marstek: force mode entity (select or number, 0=stop/1=charge/2=discharge)",
           "ent_ms_charge": "Marstek: forcible charge power number (W)",
           "ent_ms_discharge": "Marstek: forcible discharge power number (W)",
-          "wedge_post_saldering": "Export price discount after net-metering ends (EUR/kWh, from 2027)"
+          "wedge_post_saldering": "Export price discount after net-metering ends (EUR/kWh, from 2027)",
+          "ent_import_totalen": "Grid import total counters (yearly netting guard, optional)",
+          "ent_export_totalen": "Grid export total counters (yearly netting guard, optional)"
         }
       }
     },

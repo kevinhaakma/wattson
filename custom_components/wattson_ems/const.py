@@ -63,6 +63,11 @@ CONF_MIN_SOC_PCT = "min_soc_pct"
 CONF_P_CHARGE = "p_charge_max_w"
 CONF_P_DISCHARGE = "p_discharge_max_w"
 
+# jaarsaldering-bewaking: totaaltellers (kWh, total_increasing) waaruit de
+# netto-importruimte van dit jaar wordt berekend; leeg = bewaking uit
+CONF_ENT_IMPORT_TOTALS = "ent_import_totalen"
+CONF_ENT_EXPORT_TOTALS = "ent_export_totalen"
+
 # exportprijs-korting ná het saldering-einde (1-1-2027, zie scenario.py):
 # wat een teruggeleverde kWh dan minder waard is dan een geïmporteerde.
 # Onder saldering komt de wedge uit params.json (getraind, ~0,02).
@@ -105,6 +110,8 @@ DEFAULT_OPTIONS = {
     CONF_P_CHARGE: 1600,
     CONF_P_DISCHARGE: 800,
     CONF_WEDGE_POST: 0.10,
+    CONF_ENT_IMPORT_TOTALS: [],
+    CONF_ENT_EXPORT_TOTALS: [],
 }
 
 EV_THRESHOLD_KW = 0.5      # daarboven telt als "auto laadt"
@@ -212,9 +219,14 @@ EV_SUSPECT_JUMP_W = 3000
 # slijtagegewicht. Combinaties komen uit de grid-search (backtest 95 dgn,
 # saldering / 2027): agressief €172/€168 pj bij 22,7/35,0% zelfvoorziening,
 # gebalanceerd €165/€166 bij 27,3/37,7%, rustig €140/€159 bij 33,2/39,4%.
+# beta = extra export-korting bovenop pref (asymmetrie): beprijst
+# centen-trades (reserve verkopen om hem uren later terug te kopen) zonder
+# huisdekking te raken. Backtest 95 dgn saldering: agressief €172/23,0%,
+# gebalanceerd €158/29,8% (−€7 t.o.v. symmetrisch, −0,33 kWh/dag export),
+# rustig €116/37,5%.
 AGGRO_LEVELS = {
-    "rustig": {"pref": 0.05, "deg": 0.01, "risk": 0.10},
-    "gebalanceerd": {"pref": 0.02, "deg": 0.02, "risk": 0.05},
-    "agressief": {"pref": 0.0, "deg": 0.03, "risk": 0.02},
+    "rustig": {"pref": 0.05, "beta_extra": 0.04, "deg": 0.02, "risk": 0.10},
+    "gebalanceerd": {"pref": 0.02, "beta_extra": 0.02, "deg": 0.02, "risk": 0.05},
+    "agressief": {"pref": 0.0, "beta_extra": 0.0, "deg": 0.03, "risk": 0.02},
 }
 AGGRO_DEFAULT = "gebalanceerd"

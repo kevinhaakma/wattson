@@ -45,6 +45,8 @@ from .const import (
     CONF_ENT_ZD_MANUAL,
     CONF_ENT_ZD_OPERATION,
     CONF_ENT_ZD_OUTLIM,
+    CONF_ENT_EXPORT_TOTALS,
+    CONF_ENT_IMPORT_TOTALS,
     CONF_MIN_SOC_PCT,
     CONF_P_CHARGE,
     CONF_P_DISCHARGE,
@@ -151,6 +153,16 @@ def _battery_schema(options: dict) -> vol.Schema:
         vol.Required(CONF_P_CHARGE, default=_value(options, CONF_P_CHARGE)): vol.Coerce(float),
         vol.Required(CONF_P_DISCHARGE, default=_value(options, CONF_P_DISCHARGE)): vol.Coerce(float),
         vol.Required(CONF_WEDGE_POST, default=_value(options, CONF_WEDGE_POST)): vol.Coerce(float),
+        # jaarsaldering-bewaking: totaaltellers waaruit de resterende
+        # netto-importruimte wordt berekend (leeg = bewaking uit)
+        vol.Optional(CONF_ENT_IMPORT_TOTALS,
+                     default=list(_value(options, CONF_ENT_IMPORT_TOTALS) or [])):
+            selector.EntitySelector(selector.EntitySelectorConfig(
+                domain="sensor", multiple=True)),
+        vol.Optional(CONF_ENT_EXPORT_TOTALS,
+                     default=list(_value(options, CONF_ENT_EXPORT_TOTALS) or [])):
+            selector.EntitySelector(selector.EntitySelectorConfig(
+                domain="sensor", multiple=True)),
     })
 
 
