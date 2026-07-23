@@ -10,7 +10,7 @@
       },
       "sources": {
         "title": "Measurements and forecasts",
-        "description": "Select the three required measurements. PV and EV entities are optional. Power sensors may use W or kW; energy forecasts may use Wh, kWh or MWh.",
+        "description": "Select the three required measurements. PV and EV entities are optional. Power sensors may use W or kW; energy forecasts may use Wh, kWh or MWh. Note: without an EV charger power sensor Wattson cannot see EV charging — the battery then only avoids feeding the car via a sudden-load heuristic, which reacts one planning tick late.",
         "data": {
           "ent_price": "Dynamic price sensor with hourly forecast",
           "ent_soc": "Battery state of charge (%)",
@@ -74,7 +74,7 @@
     "step": {
       "init": {
         "title": "Wattson — source entities",
-        "description": "Point Wattson at the entities on your own installation.",
+        "description": "Point Wattson at the entities on your own installation. Note: without an EV charger power sensor Wattson cannot see EV charging — the battery then only avoids feeding the car via a sudden-load heuristic, which reacts one planning tick late.",
         "data": {
           "ent_price": "Price sensor (dynamic tariff, with forecast attribute)",
           "ent_soc": "Battery SoC sensor (%)",

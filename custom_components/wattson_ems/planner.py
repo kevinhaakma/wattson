@@ -25,11 +25,15 @@ prijsdrempel. sell_ok=False begrenst ontladen op de netto huisvraag.
 
 class Params:
     def __init__(self, **kw):
+        # Defaults spiegelen het battery-blok in params.json (de canonieke,
+        # door de trainer geëxporteerde apparaatgrenzen); dit bestand blijft
+        # bewust dependency-vrij, dus de waarden staan hier als literal.
+        # Coordinator en trainer overschrijven ze altijd expliciet.
         self.capacity_kwh = 5.76
         self.soc_min_kwh = 0.58        # 10%
         self.soc_max_kwh = 5.76
-        self.p_charge_max_w = 1600.0
-        self.p_discharge_max_w = 800.0
+        self.p_charge_max_w = 2000.0   # opties-laadlimiet Zendure 2400 AC
+        self.p_discharge_max_w = 1400.0  # inverse_max_power
         # Verliesmodel gekalibreerd op de massabalans van het echte apparaat
         # (179 u, 2026-07-07..15: 37,3 kWh in / 33,6 kWh uit / ΔSoC −0,67 =
         # 4,36 kWh verlies; model met deze waarden voorspelt 4,34). De oude
@@ -46,18 +50,20 @@ class Params:
         # kas-boekhouding (trainer) rekent altijd met alpha = beta = 0.
         self.alpha = 0.0
         self.beta = 0.0
-        # Onzekerheids-discount ("bij twijfel wint het huis nú"): risk_steps
-        # is de op eigen data getrainde per-uur-toename van de cumulatieve
-        # prognosefout (genormaliseerd, zie training/fit_risk.py); risk_k de
-        # sterkte. De DP vermenigvuldigt toekomstwaarde per stap met
-        # (1 - risk_k * stap): een zeker voordeel nu verslaat daardoor een
-        # even groot maar onzeker voordeel later, terwijl grote spreads
-        # (avondpiek) de kleine haircut moeiteloos overleven.
+        # Zekerheidspremie ("bij twijfel wint de uitvoerbare actie nú"):
+        # risk_steps[1] is de genormaliseerde prognosefout van het eerste
+        # vooruitkijkuur; risk_k schaalt die naar een kleine €/kWh-premie.
+        # Alleen de huidige actie krijgt die premie. Een recursieve korting op
+        # de hele toekomstige waardefunctie maakte óók bekende toekomstige
+        # kosten goedkoper en veroorzaakte tijdsinconsistent uitstel: laden
+        # werd naar een later, duurder uur geschoven om de korting te innen.
+        # Wattson herplant rollend, dus zodra een toekomstuur aanbreekt krijgt
+        # de dan uitvoerbare actie vanzelf dezelfde kleine voorkeur.
         self.risk_k = 0.0
         self.risk_steps = ()
         self.soc_step_kwh = 0.08
-        self.charge_levels = (0.0, 400.0, 800.0, 1200.0, 1600.0)
-        self.discharge_levels = (0.0, 200.0, 400.0, 600.0, 800.0)
+        self.charge_levels = (0.0, 500.0, 1000.0, 1500.0, 2000.0)
+        self.discharge_levels = (0.0, 350.0, 700.0, 1050.0, 1400.0)
         for k, v in kw.items():
             if not hasattr(self, k):
                 raise TypeError("onbekende parameter: %s" % k)
@@ -238,16 +244,16 @@ def plan_with_values(steps, soc0_kwh, params, terminal_value=0.0):
         i = int(round((soc - params.soc_min_kwh) / params.soc_step_kwh))
         return max(0, min(n_soc - 1, i))
 
-    # onzekerheids-fade per stap: de waarde van alles vanaf uur t+1 telt,
-    # gezien vanaf uur t, licht af met de getrainde prognose-onzekerheid.
-    # Compounding door de recursie benadert de cumulatieve foutcurve.
+    # Tijd-consistente zekerheidspremie. Alleen wat Wattson in deze plantick
+    # werkelijk kan uitvoeren (t=0) krijgt een kleine voorkeur bij een bijna-
+    # gelijkspel. Toekomstige kosten én opbrengsten blijven in dezelfde euro's
+    # staan; anders kan de planner verdienen aan puur wachten.
     rk = params.risk_k
     rs = params.risk_steps
-    def fade(lead):
-        if rk <= 0.0 or not rs:
-            return 1.0
-        s = rs[min(lead, len(rs) - 1)]
-        return max(1.0 - rk * s, 0.5)
+    certainty_eur_kwh = (
+        max(rk, 0.0) * max(rs[1], 0.0)
+        if rk > 0.0 and len(rs) > 1 else 0.0
+    )
 
     # V[i] = minimale kosten vanaf dit punt bij SoC grid_soc[i]
     V = [-(s - params.soc_min_kwh) * terminal_value for s in grid_soc]
@@ -255,14 +261,14 @@ def plan_with_values(steps, soc0_kwh, params, terminal_value=0.0):
     lam_rows = []  # per stap: λ per SoC-gridvak (−ΔV/Δsoc)
     for t_abs in range(len(steps) - 1, -1, -1):
         step = steps[t_abs]
-        f = fade(t_abs + 1)
         Vn = [0.0] * n_soc
         bn = [0.0] * n_soc
         for i, soc in enumerate(grid_soc):
             bc, ba = None, 0.0
             for a in actions:
-                c, soc2, act, _ = hour_result(step, a, soc, params)
-                tot = c + V[snap(soc2)] * f
+                c, soc2, act, thru = hour_result(step, a, soc, params)
+                certainty = certainty_eur_kwh * thru if t_abs == 0 else 0.0
+                tot = c - certainty + V[snap(soc2)]
                 if bc is None or tot < bc - 1e-9:
                     bc, ba = tot, a
             Vn[i], bn[i] = bc, ba

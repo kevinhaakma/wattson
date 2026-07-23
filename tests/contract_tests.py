@@ -147,6 +147,27 @@ def test_zendure():
     sel = [d for d in hass.services.calls if d[1] == "select_option"]
     check("zendure: operation -> manual", sel and sel[-1][2]["option"] == "manual")
 
+    # Herstart-race: HA kan smart_charging herstellen terwijl de fysieke
+    # inputLimit nog 0 is. De eerste actie moet dezelfde select-optie daarom
+    # bewust opnieuw aanbieden; alleen state-vergelijking is hier onvoldoende.
+    hass = zendure_hass()
+    hass._states["select.zd_op"] = FakeState("smart_charging", {"options": []})
+    c, ad = make_zendure(hass)
+    run(ad.apply("laden_overschot", 900.0))
+    sel = [d for d in hass.services.calls if d[1] == "select_option"]
+    check("zendure: eerste smart-charge herbevestigt herstelde managerstand",
+          sel and sel[-1][2]["option"] == "smart_charging")
+
+    # Een directionele noodstop sluit de inputlimiet; ook daarna moet dezelfde
+    # managerstand exact één keer opnieuw worden aangeboden.
+    hass.services.calls.clear()
+    run(ad.emergency_stop("laden"))
+    hass.services.calls.clear()
+    run(ad.apply("laden_overschot", 900.0))
+    sel = [d for d in hass.services.calls if d[1] == "select_option"]
+    check("zendure: smart-charge heropent richting na noodstop",
+          sel and sel[-1][2]["option"] == "smart_charging")
+
     # ontladen: Wattson is de enige P1-regelaar. De Zendure-manager krijgt een
     # vast manual-setpoint en mag als enige de fysieke outputLimit schrijven.
     hass = zendure_hass()
@@ -158,6 +179,12 @@ def test_zendure():
                   for d in hass.services.calls if d[1] == "select_option"))
     check("zendure: normaal ontladen schrijft outputLimit niet rechtstreeks",
           not calls_for(hass, "number.zd_out"))
+
+    # De snelle volglus heeft een expliciet adaptercontract voor uitsluitend
+    # de matching-limiet; de coordinator serialiseert deze write apart.
+    applied = run(ad.adjust_discharge_limit(550.0))
+    check("zendure: realtime-limiet schrijft alleen outputLimit",
+          applied == 550.0 and last_value(hass, "number.zd_out") == 550.0)
 
     # Een klein vast setpoint mag niet omhoog worden afgerond: dat zou export
     # veroorzaken. De manager/apparaatdrempel bepaalt of 40 W uitvoerbaar is.
@@ -239,6 +266,20 @@ def test_zendure():
           last_value(hass, "number.zd_manual") == 500.0
           and effective_value(hass, "number.zd_out") == 0.0
           and not any(call[2]["value"] > 0 for call in calls_for(hass, "number.zd_out")))
+
+    # Live-regressie: rust houdt het manual-setpoint vast, maar sluit de
+    # fysieke richting. Dezelfde laadopdracht moet bij off -> manual daarom
+    # bewust opnieuw naar de manager, anders blijft inputLimit op 0 staan.
+    hass = zendure_hass()
+    hass._states["select.zd_op"] = FakeState("off", {"options": []})
+    hass._states["number.zd_manual"] = FakeState(
+        "-1000", {"min": -2400, "max": 2400, "unit_of_measurement": "W"})
+    c, ad = make_zendure(hass)
+    run(ad.apply("laden", 1000.0))
+    check("zendure: zelfde laadsetpoint wordt na rust opnieuw aangeboden",
+          last_value(hass, "number.zd_manual") == -1000.0
+          and any(d[1] == "select_option" and d[2].get("option") == "manual"
+                  for d in hass.services.calls))
 
     # noodstop: alleen de foute richting dicht
     hass = zendure_hass()

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from . import adapters as A
 from .const import EV_THRESHOLD_KW
+from .control import AdviceMode, BatteryAction, CommandSource, Decision
 from .telemetry import Telemetry
 
 
@@ -70,12 +71,15 @@ class EvMonitor:
         if self.house_share_active:
             return
         if c.control_enabled and self.charging() and (
-                c.advies in ("ontladen", "verkopen") or c.assist_active == "ontladen"):
+                c.mode.expects_discharge or c.assist_active == "ontladen"):
             prev = (c.advies, c.last_applied)
             c.assist_active = None
-            c.hass.async_create_task(c.set_battery("rust", 0.0))
-            c.advies = "rust (EV-guard)"
-            c.setpoint_w = 0.0
-            c.reden = "EV begon te laden — ontladen direct gestopt"
+            c.command_arbiter.invalidate_pending()
+            c.hass.async_create_task(c.set_battery(
+                BatteryAction.IDLE, 0.0, source=CommandSource.SAFETY))
+            c.set_decision(Decision(
+                AdviceMode.EV_GUARD,
+                reason="EV begon te laden — ontladen direct gestopt",
+            ))
             c.log_decision(prev)  # ingreep zichtbaar in het historie-attribuut
             c.write_entities()

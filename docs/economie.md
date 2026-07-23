@@ -65,27 +65,26 @@ Omdat het gebruik al óp het omslagpunt zit waar extra cycli echt levensduur
 kosten, is **€0,03** de best verdedigbare marginale waarde; de gebruikte €0,04
 is licht conservatief. `DEG_TRUE` in de trainer: 0,04 → **0,03** aanbevolen.
 
-## 5. Architectuurconsequentie: zelfverbruik vs. arbitrage
+## 5. Architectuurconsequentie: zelfverbruik vs. arbitrage — opgelost in v3
 
-De planner is gebouwd als **eigenverbruik-optimalisator**: ontladen is hard
-begrensd op de huisvraag (`planner.hour_result`, sell alleen boven
-`verkoop_drempel` €0,45). Met wedge ≈ 0 is dat economisch te smal:
+De planner was oorspronkelijk een **eigenverbruik-optimalisator**: ontladen hard
+begrensd op de huisvraag, verkopen alleen boven een vaste drempel (€0,45). Met
+wedge ≈ 0 onder saldering was dat economisch te smal — exporteren om 21:00 tegen
+€0,36 is exact evenveel waard als de huisvraag dekken, en de drempel blokkeerde
+volledige prijsarbitrage vrijwel permanent (geschatte gemiste waarde: €0,2–0,3
+per dag met ≥ €0,15 spread).
 
-- exporteren om 21:00 tegen €0,36 is exact evenveel waard als de huisvraag dekken
-- de correcte strategie onder saldering is **volledige prijsarbitrage**: laden op
-  vol vermogen in de goedkoopste uren, ontladen op vol vermogen in de duurste
-  uren, surplus het net op — de huisvraag is alleen nog een bijzaak
-- de verkoop-drempel van €0,45 blokkeert deze strategie vrijwel permanent
-- ná 2027 (wedge ≈ 0,10) wordt de huidige zelfverbruik-architectuur wél weer
-  grotendeels correct
+**Huidige implementatie (v3):** de vaste verkoop-drempel bestaat niet meer.
+Verkopen is een gebruikers-constraint (`switch.wattson_verkopen`); staat die aan,
+dan geeft elk uur `sell_ok=True` mee en beslist de DP zélf per uur of exporteren
+boven de huisvraag loont (exportprijs vs. marginale bewaarwaarde λ, incl.
+slijtage en rendement — `planner.hour_result`). Zonder de switch blijft ontladen
+begrensd op de netto huisvraag. Ná 2027 (wedge ≈ 0,10) maakt diezelfde afweging
+export vanzelf zeldzamer; er is geen aparte architectuur meer voor nodig.
 
-Ruwe schatting gemiste waarde onder saldering: volle-capaciteit-arbitrage
-(≈ 5,2 kWh × netto spread ≈ €0,09/kWh op een dag als vandaag) t.o.v. huidig
-avondtekort-dekken (≈ 2,2 kWh) ≈ **€0,2–0,3/dag** op dagen met ≥ €0,15 spread —
-zelfde orde van grootte als de totale huidige backtest-waarde (€49/jr).
-Kanttekeningen: meer doorzet → hogere marginale slijtage (regime kantelt boven
-~1 cyclus/dag), en apparaat-uitvoer is nu op 1400 W begrensd (Zendure-app-instelling;
-hardware kan 2400 W).
+Kanttekeningen die blijven gelden: meer doorzet → hogere marginale slijtage
+(regime kantelt boven ~1 cyclus/dag), en apparaat-uitvoer is op 1400 W begrensd
+(Zendure-app-instelling; hardware kan 2400 W).
 
 ## Openstaande verificaties
 

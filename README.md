@@ -7,7 +7,7 @@
 **Explainable smart home battery control for Home Assistant**
 
 [![HACS Custom](https://img.shields.io/badge/HACS-Custom-1565C0.svg?style=for-the-badge)](https://github.com/hacs/integration)
-[![Version](https://img.shields.io/badge/version-2.0.0-00B4B0.svg?style=for-the-badge)](#)
+[![Version](https://img.shields.io/badge/version-3.1.2-00B4B0.svg?style=for-the-badge)](#)
 [![License](https://img.shields.io/badge/license-MIT-1565C0.svg?style=for-the-badge)](#)
 [![Maintained](https://img.shields.io/badge/maintained-yes-22C55E.svg?style=for-the-badge)](#)
 
@@ -225,6 +225,13 @@ have different urgency:
   planner or assist-stop interval. Source export is calculated conservatively:
   the full unconfirmed discharge command is removed before the guard decides.
 
+All planner, real-time, user, lifecycle, and safety commands pass through one
+command arbiter. Adapter writes therefore never overlap. A safety stop also
+invalidates commands that were already waiting, so an older real-time request
+cannot restart the battery after the stop. Replan triggers are serialized in
+the same way: a trigger during a running plan requests one fresh rerun instead
+of starting a second coordinator cycle.
+
 ### Adding a new brand adapter
 
 All brand-specific logic lives in `custom_components/wattson_ems/adapters.py`.
@@ -238,8 +245,10 @@ adapter's declared capabilities rather than its name:
   its own export guard, `surplus_mode` whether solar-surplus assist can use a
   native mode, and `min_setpoint_w` the smallest useful setpoint;
 - register the class in `create_adapter` and run all standalone suites:
-  `python tests/contract_tests.py`, `python tests/planner_tests.py`, and
-  `python tests/control_logic_tests.py`. They
+  `python tests/contract_tests.py`, `python tests/planner_tests.py`,
+  `python tests/control_logic_tests.py`, `python tests/scenario_tests.py`,
+  `python tests/coordinator_tests.py`, and
+  `python tests/ha_data_scenario_tests.py`. They
   exercise command translation, P1 capping, unit conversion (W/kW/MW),
   emergency stops, stale telemetry, cumulative reserve calculation,
   solar-backed budgeting, ineffective boundary actions, EV at-home gates, and
@@ -464,6 +473,31 @@ or correct operation of connected equipment.
 <sub>Built with a local pure-Python rolling-horizon planner — no cloud and no runtime dependencies.</sub>
 </div>
 
+## v3.1.2 — time-consistent planning and safe restart
+
+- Future costs and revenues remain in the same euros throughout the rolling
+  horizon. A certainty premium applies only to an action that can be taken now,
+  preventing a cheapest solar hour from being postponed on every replan.
+- Historical HA scenarios reconstruct demand without battery influence and
+  verify charging, waiting, house-demand discharge, and export behavior.
+- A fully solar-backed planned charge may start through the normal switching
+  deadband, while a restart first commands idle and then explicitly reapplies
+  the selected battery direction after data becomes available.
+
+## v3.1.0 — typed decisions and serialized control
+
+- `control.py` defines typed advice modes, physical battery actions, command
+  sources, and the single command arbiter. Existing Dutch sensor-state labels
+  remain unchanged for dashboard and automation compatibility.
+- `planning_service.py` owns DP evaluation, cash-savings simulation, plan
+  presentation, and first-step classification. The coordinator now has
+  explicit `build context -> evaluate -> stabilize -> apply` phases.
+- Concurrent replan triggers are coalesced, and safety/user/lifecycle stops
+  invalidate older queued hardware commands before commanding idle.
+- Coordinator regressions now cover command serialization, safety precedence,
+  replan coalescing, and listener lifecycle in addition to planner/realtime
+  behavior.
+
 ## v3.0.0 — explicit objective and marginal-value dispatch
 
 The foundation changed from a self-consumption optimizer with economic
@@ -481,16 +515,19 @@ patches to an explicit objective: **money and self-sufficiency together**.
 - The measured net-metering wedge (≈ €0.00, see docs/economie.md) and a
   recalibrated degradation cost (€0.03/kWh) went into the retrained parameters;
   device powers now match reality (2000 W charge / 1400 W discharge).
-- Backtest (95 days, walk-forward): savings **€172/yr under net metering**
-  (was €49) at 98% of the hindsight ceiling, €168/yr post-2027. The
-  aggressiveness knob trades €/yr against self-sufficiency:
-  agressief €172 / 22.7%, gebalanceerd €165 / 27.3%, rustig €140 / 33.2%.
+- Backtest (95 days, walk-forward, EV-cleaned training set): savings are about
+  **€166/yr under net metering** and €174/yr post-2027 in aggressive mode.
+  The aggressiveness knob trades cash value against self-sufficiency:
+  aggressive €166/€174 at 41.6/59.1%, balanced €153/€169 at 52.3/63.0%, and
+  quiet €119/€163 at 61.6/65.7% (net metering/post-2027).
 
 ## v2.0.0 — architecture and model calibration
 
 The coordinator has been decomposed into single-responsibility components
-(`telemetry`, `ev`, `forecast`, `scenario`, `budget`, `safety`, `realtime`);
-the coordinator itself only wires them together and runs the plan tick.
+(`telemetry`, `ev`, `forecast`, `scenario`, `safety`, `realtime`, `values`).
+Since v3.1, pure plan evaluation and classification live in
+`planning_service.py`; the coordinator owns lifecycle, source snapshots,
+decision stabilization, and execution routing.
 
 Model changes, all calibrated against measured device data:
 

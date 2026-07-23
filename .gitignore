@@ -1,2 +1,6 @@
 __pycache__/
 *.pyc
+
+__pycache__/
+.ruff_cache/
+training/data/raw_stats.json
