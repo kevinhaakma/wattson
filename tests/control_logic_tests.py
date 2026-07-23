@@ -69,6 +69,14 @@ def main():
             ready_since == 100 and is_ready,
         "exporttimer reset onder de drempel":
             reset_since is None and not reset_ready,
+        "exportrust: nooit export gezien laat piek-assist toe":
+            A.export_quiet(100, None, 300),
+        "exportrust: verse bronexport blokkeert piek-assist":
+            not A.export_quiet(100, 90, 300),
+        "exportrust: net binnen het venster blijft geblokkeerd":
+            not A.export_quiet(389, 90, 300),
+        "exportrust: na het venster mag piek-assist weer":
+            A.export_quiet(390, 90, 300),
         "12:24 incident herstelt binnen 21 seconden": replay_recovery([
             (0, -808, 494, 49),
             (11, -855, 0, 494),

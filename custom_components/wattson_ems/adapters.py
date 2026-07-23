@@ -138,7 +138,19 @@ def export_recovery_state(source_p1_w: float, *, threshold_w: float,
     return since, now_s - since >= hold_s
 
 
-async def set_number(hass, entity: str, value) -> None:
+def export_quiet(now_s: float, last_export_s: float | None,
+                 quiet_s: float) -> bool:
+    """Of de bron lang genoeg export-stil is om piek-ontladen te starten.
+
+    Bij wisselend zonweer pendelt de bronflow rond nul: een importpiek is dan
+    geen bewijs dat het overschot weg is, en een gestart ontladen wordt binnen
+    een minuut weer door de exportbewaking afgebroken. Pas als er een heel
+    rustvenster geen bronexport is gezien, is de piek het relais waard.
+    """
+    return last_export_s is None or now_s - last_export_s >= quiet_s
+
+
+async def set_number(hass, entity: str, value, *, force: bool = False) -> None:
     """Zet een number-entity, geclampt op haar eigen min/max.
 
     Het apparaat bepaalt zijn eigen grenzen (bv. output_limit max 1400 W);
@@ -158,10 +170,14 @@ async def set_number(hass, entity: str, value) -> None:
                 value = max(float(value), float(lo))
         except (TypeError, ValueError):
             pass
-        # ongewijzigd = niet schrijven: elke write herstart de regelaar van
-        # het apparaat kort (zichtbaar als ~40 s idle-dip + relais-tik)
+        # ongewijzigd = normaal niet schrijven: elke write herstart de regelaar
+        # van het apparaat kort (zichtbaar als ~40 s idle-dip + relais-tik).
+        # Na een modewissel kan een identieke manual-waarde juist wél nodig
+        # zijn om een eerder hard dichtgezette richting opnieuw te activeren.
         try:
-            if math.isclose(float(st.state), float(value), rel_tol=1e-3, abs_tol=1e-3):
+            if (not force
+                    and math.isclose(float(st.state), float(value),
+                                     rel_tol=1e-3, abs_tol=1e-3)):
                 return
         except (TypeError, ValueError):
             pass
@@ -169,7 +185,8 @@ async def set_number(hass, entity: str, value) -> None:
         "number", "set_value", {"entity_id": entity, "value": value}, blocking=True)
 
 
-async def set_power_number(hass, entity: str, watts: float) -> None:
+async def set_power_number(
+        hass, entity: str, watts: float, *, force: bool = False) -> None:
     """Zet een number-vermogensentity, ongeacht of die W, kW of MW gebruikt."""
     unit = unit_of(hass, entity)
     native = watts
@@ -177,7 +194,7 @@ async def set_power_number(hass, entity: str, watts: float) -> None:
         native = watts / 1000.0
     elif unit == "mw":
         native = watts / 1_000_000.0
-    await set_number(hass, entity, native)
+    await set_number(hass, entity, native, force=force)
 
 
 # ---------------------------------------------------------------------------
@@ -237,6 +254,14 @@ class BatteryAdapter:
     async def emergency_stop(self, richting) -> None:
         return None
 
+    async def adjust_discharge_limit(self, power_w: float) -> float:
+        """Pas alleen de realtime ontlaadruimte aan.
+
+        Adapters zonder aparte matching-limiet vallen terug op een normaal
+        vast ontlaadcommando. Zendure overschrijft dit met zijn outputLimit.
+        """
+        return await self.apply("ontladen", power_w, p1_cap=False)
+
     async def enforce_rest(self) -> None:
         return None
 
@@ -275,10 +300,22 @@ class ZendureAdapter(BatteryAdapter):
     voor PV-overschot. Noodstops zetten de target van de foute richting dicht.
     """
 
+    async def adjust_discharge_limit(self, power_w: float) -> float:
+        await set_power_number(self.c.hass, self.c.ent_zd_outlim, power_w)
+        return power_w
+
     name = "zendure"
     caps = AdapterCaps(p1_matching=False, device_limits=True, surplus_mode=True,
                        control_latency_s=5.0, min_setpoint_w=50.0,
                        feedback_ack=True)
+
+    def __init__(self, coordinator):
+        super().__init__(coordinator)
+        # Een herstart of noodstop kan de fysieke richting op 0 achterlaten
+        # terwijl de manager-select zijn oude mode herstelt. De eerste echte
+        # actie per richting moet daarom één keer opnieuw naar de manager,
+        # ook als select/manual_power in HA al dezelfde waarde toont.
+        self._needs_reapply = {"laden", "ontladen"}
 
     def telemetry_entities(self):
         return (self.c.ent_zd_chg, self.c.ent_zd_dis)
@@ -324,8 +361,10 @@ class ZendureAdapter(BatteryAdapter):
         # limiet van de foute richting dicht (of allebei bij onbekend);
         # apparaat-commando: komt ook aan als de select al 'off' toont
         if richting in (None, "laden"):
+            self._needs_reapply.add("laden")
             await set_power_number(self.c.hass, self.c.ent_zd_inlim, 0)
         if richting in (None, "ontladen"):
+            self._needs_reapply.add("ontladen")
             await set_power_number(self.c.hass, self.c.ent_zd_outlim, 0)
 
     async def enforce_rest(self):
@@ -343,13 +382,19 @@ class ZendureAdapter(BatteryAdapter):
         c = self.c
         # ac_mode zelf meesturen: het apparaat laadt alleen via AC als de
         # ac_mode op 'input' staat en ontlaadt alleen op 'output'; de
-        # Zendure-manager zet dit niet betrouwbaar (incidenten 9 en 10 juli).
+        # Zendure-manager zet dit niet betrouwbaar zelf.
         # Bij 'off' blijft de stand staan — geen richtingswissel nodig.
+        richting = None
+        if mode in ("smart_charging", "store_solar") or (mode == "manual" and manual_w < 0):
+            richting = "laden"
+        elif mode in ("smart_discharging", "smart") or (mode == "manual" and manual_w > 0):
+            richting = "ontladen"
+        force_reapply = richting in self._needs_reapply
         if c.ent_zd_acmode:
             gewenst = None
-            if mode in ("smart_charging", "store_solar") or (mode == "manual" and manual_w < 0):
+            if richting == "laden":
                 gewenst = "input"
-            elif mode in ("smart_discharging", "smart") or (mode == "manual" and manual_w > 0):
+            elif richting == "ontladen":
                 gewenst = "output"
             if gewenst is not None:
                 cur_ac = c.hass.states.get(c.ent_zd_acmode)
@@ -363,12 +408,20 @@ class ZendureAdapter(BatteryAdapter):
         # limiet-pingpong en herstarts. Alleen rust/noodstop gebruikt ze nog als
         # harde directionele stop; een volgende manageractie opent de richting.
         cur = c.hass.states.get(c.ent_zd_operation)
+        mode_changed = cur is None or cur.state != mode
         if mode == "manual":
-            await set_power_number(c.hass, c.ent_zd_manual, manual_w)
-        if cur is None or cur.state != mode:
+            # Een stop/noodstop laat manual_power bewust staan maar zet de
+            # fysieke richting dicht. Bij terugkeer naar manual moet dezelfde
+            # waarde daarom opnieuw door de Zendure-manager verwerkt worden.
+            await set_power_number(
+                c.hass, c.ent_zd_manual, manual_w,
+                force=mode_changed or force_reapply)
+        if mode_changed or force_reapply:
             await c.hass.services.async_call(
                 "select", "select_option",
                 {"entity_id": c.ent_zd_operation, "option": mode}, blocking=True)
+        if richting is not None:
+            self._needs_reapply.discard(richting)
         c.last_applied = f"{mode} ({manual_w:+.0f} W)" if mode == "manual" else mode
 
 

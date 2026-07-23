@@ -8,6 +8,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.restore_state import RestoreEntity
 
 from .const import DOMAIN
+from .control import AdviceMode, BatteryAction, CommandSource, Decision
 from .entity import wattson_device_info
 
 
@@ -19,6 +20,7 @@ async def async_setup_entry(
         WattsonControlSwitch(coordinator),
         WattsonAssistSwitch(coordinator),
         WattsonSellSwitch(coordinator),
+        WattsonFillSwitch(coordinator),
     ])
 
 
@@ -55,11 +57,14 @@ class WattsonControlSwitch(SwitchEntity, RestoreEntity):
         self._attr_is_on = False
         self.async_write_ha_state()
         # bij uitzetten: accu in veilige ruststand
-        await self.coordinator._set_battery("rust", 0.0)
+        self.coordinator.command_arbiter.invalidate_pending()
+        await self.coordinator.set_battery(
+            BatteryAction.IDLE, 0.0, source=CommandSource.USER)
         if was_assisting:
-            self.coordinator.advies = "rust"
-            self.coordinator.setpoint_w = 0.0
-            self.coordinator.reden = "sturing uitgezet — assist gestopt"
+            self.coordinator.set_decision(Decision(
+                AdviceMode.IDLE,
+                reason="sturing uitgezet — assist gestopt",
+            ))
 
 
 class WattsonAssistSwitch(SwitchEntity, RestoreEntity):
@@ -91,10 +96,13 @@ class WattsonAssistSwitch(SwitchEntity, RestoreEntity):
         self.async_write_ha_state()
         if self.coordinator.assist_active:
             self.coordinator.assist_active = None
-            await self.coordinator._set_battery("rust", 0.0)
-            self.coordinator.advies = "rust"
-            self.coordinator.setpoint_w = 0.0
-            self.coordinator.reden = "bijspringen uitgezet"
+            self.coordinator.command_arbiter.invalidate_pending()
+            await self.coordinator.set_battery(
+                BatteryAction.IDLE, 0.0, source=CommandSource.USER)
+            self.coordinator.set_decision(Decision(
+                AdviceMode.IDLE,
+                reason="bijspringen uitgezet",
+            ))
 
 
 class WattsonSellSwitch(SwitchEntity, RestoreEntity):
@@ -125,5 +133,44 @@ class WattsonSellSwitch(SwitchEntity, RestoreEntity):
         self.coordinator.sell_enabled = False
         self._attr_is_on = False
         self.async_write_ha_state()
-        if self.coordinator.advies == "verkopen":
+        if self.coordinator.mode is AdviceMode.SELL:
             await self.coordinator._tick(None)  # herplannen zonder verkoop
+
+
+class WattsonFillSwitch(SwitchEntity, RestoreEntity):
+    """Vul-modus (noodvoorraad): laad de accu naar vol en houd hem vol,
+    ongeacht de economie. Zonoverschot gaat er altijd in; ontbreekt dat,
+    dan wordt op het maximale laadvermogen uit het net bijgevuld. Geplande
+    en realtime ontlading staan uit zolang deze switch aan is."""
+
+    _attr_name = "Wattson vullen"
+    _attr_unique_id = "wattson_vullen"
+    _attr_icon = "mdi:battery-plus"
+
+    def __init__(self, coordinator):
+        self.coordinator = coordinator
+        self._attr_device_info = wattson_device_info(coordinator)
+
+    async def async_added_to_hass(self):
+        await super().async_added_to_hass()
+        last = await self.async_get_last_state()
+        self.coordinator.fill_mode = bool(last and last.state == "on")
+        self._attr_is_on = self.coordinator.fill_mode
+        if self.coordinator.fill_mode:
+            # zelfde opstart-race als de master-switch: direct herplannen
+            self.hass.async_create_task(self.coordinator._tick(None))
+
+    async def async_turn_on(self, **kwargs):
+        self.coordinator.fill_mode = True
+        self._attr_is_on = True
+        self.async_write_ha_state()
+        await self.coordinator._tick(None)
+
+    async def async_turn_off(self, **kwargs):
+        self.coordinator.fill_mode = False
+        self._attr_is_on = False
+        self.async_write_ha_state()
+        # een lopend vul-laadcommando niet laten hangen tot de volgende tick
+        if self.coordinator.assist_active:
+            self.coordinator.assist_active = None
+        await self.coordinator._tick(None)
