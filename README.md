@@ -7,7 +7,7 @@
 **Explainable smart home battery control for Home Assistant**
 
 [![HACS Custom](https://img.shields.io/badge/HACS-Custom-1565C0.svg?style=for-the-badge)](https://github.com/hacs/integration)
-[![Version](https://img.shields.io/badge/version-3.5.1-00B4B0.svg?style=for-the-badge)](#)
+[![Version](https://img.shields.io/badge/version-3.5.2-00B4B0.svg?style=for-the-badge)](#)
 [![License](https://img.shields.io/badge/license-MIT-1565C0.svg?style=for-the-badge)](#)
 [![Maintained](https://img.shields.io/badge/maintained-yes-22C55E.svg?style=for-the-badge)](#)
 
@@ -332,31 +332,38 @@ in Home Assistant?) are welcome as GitHub issues.
 All entities are grouped under one virtual **Wattson EMS** device in Home
 Assistant.
 
-## Lovelace card
+## Lovelace cards
 
-Wattson includes a small dependency-free card showing the current advice,
-setpoint, state of charge, expected plan benefit, and a compact plan chart.
+Wattson ships two dependency-free cards in `www/`:
 
-Add the resource through **Settings → Dashboards → Resources**, or through YAML:
+- `wattson-v3-card.js` — the full picture: decision tree with energy trace,
+  price-zone meter, hourly plan and battery/grid strip; detail on tap.
+- `wattson-card.js` — a compact advice/setpoint/SoC card with a mini plan chart.
+
+HACS installs only the integration; it does not serve the `www/` files of an
+integration repository. Copy the card file(s) from this repository into your
+`/config/www/` folder and register the resource through
+**Settings → Dashboards → Resources** (or YAML):
 
 ```yaml
 resources:
-  - url: /hacsfiles/wattson/wattson-card.js
+  - url: /local/wattson-v3-card.js
     type: module
 ```
 
 Add the card:
 
 ```yaml
-type: custom:wattson-card
+type: custom:wattson-v3-card
 entity: sensor.wattson_advies  # Optional; this is the default
-title: Wattson                 # Optional
-hours: 12                      # Optional number of plan hours
 ```
 
-Click the Wattson battery icon or the SoC value to open a live detail popup.
-It shows the current action and reason, P1/house/PV/battery power, reserve,
-the command sent to the adapter, protection state, and recent decisions.
+The card reads state of charge, battery power and grid power from the advice
+sensor's `berekend_met` attributes, so it works for every adapter without
+further configuration. Separate entities can still be set as overrides (`soc`,
+`chg_w`, `dis_w`, `p1`, and `mode` for a Zendure operation select); the visual
+editor lists them as optional. Bump `?v=` on the resource URL after replacing
+the file so browsers pick up the new version.
 
 ## Theme and branding
 
@@ -534,6 +541,16 @@ or correct operation of connected equipment.
 <div align="center">
 <sub>Built with a local pure-Python rolling-horizon planner — no cloud and no runtime dependencies.</sub>
 </div>
+
+## v3.5.2 — brand-independent v3 card
+
+- `www/wattson-v3-card.js` (v3.7) added to the repository. SoC, battery and
+  grid power now default to the advice sensor's `berekend_met` attributes and
+  the device level is derived from `laatst_gestuurd`; the previous build used
+  the developer's Zendure entity IDs as defaults, leaving those parts empty on
+  other installations (for example Marstek).
+- README: cards must be copied to `/config/www/` and registered as `/local/`
+  resources; HACS does not serve `www/` for integration repositories.
 
 ## v3.5.1 — Marstek Modbus fixes
 
