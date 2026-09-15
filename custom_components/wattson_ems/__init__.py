@@ -10,11 +10,12 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
 from .const import DOMAIN, PLATFORMS
-from .coordinator import WattsonCoordinator
+from .coordinator import WattsonCoordinator, load_params
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    coordinator = WattsonCoordinator(hass, entry)
+    params = await hass.async_add_executor_job(load_params)
+    coordinator = WattsonCoordinator(hass, entry, params)
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
     await coordinator.async_start()
     entry.async_on_unload(entry.add_update_listener(_async_update_listener))

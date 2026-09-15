@@ -30,7 +30,6 @@ import os
 import statistics
 import time
 from collections import deque
-from collections import deque
 from dataclasses import replace
 from datetime import timedelta
 
@@ -129,8 +128,14 @@ from .values import PlanValues
 _LOGGER = logging.getLogger(__name__)
 
 
+def load_params() -> dict:
+    """Lees de verpakte plannerparameters vanuit een executor-thread."""
+    with open(os.path.join(os.path.dirname(__file__), "params.json"), encoding="utf-8") as params_file:
+        return json.load(params_file)
+
+
 class WattsonCoordinator:
-    def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry, cfg: dict) -> None:
         self.hass = hass
         self.entry = entry
         opt = entry.options
@@ -172,7 +177,6 @@ class WattsonCoordinator:
         self.adapter_impl = A.create_adapter(self.adapter, self)
         self.caps = self.adapter_impl.caps
 
-        cfg = json.load(open(os.path.join(os.path.dirname(__file__), "params.json"), encoding="utf-8"))
         b = cfg["battery"]
         cap = float(o(CONF_CAPACITY))
         min_soc = float(o(CONF_MIN_SOC_PCT)) / 100.0 * cap
@@ -250,6 +254,8 @@ class WattsonCoordinator:
 
         # ---------- gedeelde staat ----------
         self.control_enabled = False   # master-switch (RestoreEntity zet dit terug)
+        self._stopped = False          # definitief: een reload krijgt een nieuwe instantie
+        self._data_blocked = False     # geen geldig plan mogelijk; ook realtime blokkeren
         self.assist_enabled = False    # dynamisch bijspringen (aparte switch)
         self.sell_enabled = False      # verkopen boven drempelprijs (aparte switch)
         self.sell_top_pct = 0          # 0 = gewoon sell_enabled; >0 = alleen top-N% prijzen
@@ -326,7 +332,13 @@ class WattsonCoordinator:
     @property
     def last_error(self) -> str | None:
         """Het advies-sensor-attribuut 'fout' toont de ernstigste actuele fout."""
-        return self.safety.watch_error or self.plan_error
+        data_error = (
+            "telemetrie stil — sturing geblokkeerd tot verse accudata"
+            if self.safety.telemetry_blocked
+            else "plandata ontbreekt — sturing geblokkeerd" if self._data_blocked
+            else None
+        )
+        return self.safety.watch_error or self.plan_error or data_error
 
     @property
     def watch_error(self) -> str | None:
@@ -423,15 +435,20 @@ class WattsonCoordinator:
     async def async_stop(self) -> None:
         """Unload/reload: listeners weg, retry cancelen en de accu naar rust —
         anders blijft de laatste actieve stand ongecontroleerd doorlopen."""
+        was_enabled = self.control_enabled
+        self._stopped = True
+        self.control_enabled = False
+        self.assist_active = None
+        self._replan_pending = False
+        self.command_arbiter.invalidate_pending()
         for remove in self.listeners:
             remove()
         self.listeners = []
         if self._retry_cancel is not None:
             self._retry_cancel()
             self._retry_cancel = None
-        if self.control_enabled:
+        if was_enabled:
             try:
-                self.command_arbiter.invalidate_pending()
                 await self.set_battery(
                     BatteryAction.IDLE,
                     0.0,
@@ -462,11 +479,13 @@ class WattsonCoordinator:
     # ---------- kern ----------
     async def _tick(self, _now) -> None:
         """Serialiseer replans; een trigger tijdens een run vraagt één rerun."""
+        if self._stopped:
+            return
         if self._tick_lock.locked():
             self._replan_pending = True
             return
         async with self._tick_lock:
-            while True:
+            while not self._stopped:
                 self._replan_pending = False
                 await self._tick_once()
                 if not self._replan_pending:
@@ -476,6 +495,9 @@ class WattsonCoordinator:
         prev = (self.advies, self.last_applied)
         try:
             await self.safety.watchdog()
+            await self.safety.stale_guard()
+            if self._stopped:
+                return
             await self._apply_soc_ceiling()
             await self._plan_and_apply()
             self.plan_error = None
@@ -486,6 +508,8 @@ class WattsonCoordinator:
                 self.command_arbiter.invalidate_pending()
                 await self.set_battery(
                     BatteryAction.IDLE, 0.0, source=CommandSource.SAFETY)
+        if self._stopped:
+            return
         await self.safety.stale_guard()
         # zolang er nog geen geslaagd plan is (bronnen traag na herstart):
         # niet 5 minuten wachten maar elke 45 s opnieuw proberen
@@ -508,6 +532,8 @@ class WattsonCoordinator:
         daarna mag de adapter extra maatregelen nemen (bv. apparaat-limieten
         van de foute richting dichtzetten als hij die heeft).
         """
+        if self._stopped:
+            return
         self.command_arbiter.invalidate_pending()
         try:
             await self.set_battery(
@@ -526,7 +552,8 @@ class WattsonCoordinator:
                 await self.adapter_impl.emergency_stop(richting)
                 return 0.0
 
-            await self.command_arbiter.execute(command, apply_emergency)
+            await self.command_arbiter.execute(
+                command, apply_emergency, allowed=self._command_allowed)
         except Exception:  # noqa: BLE001
             _LOGGER.exception("Wattson: adapter-noodstopmaatregelen faalden")
 
@@ -563,11 +590,21 @@ class WattsonCoordinator:
             pass
 
     async def _plan_and_apply(self) -> None:
+        if self._stopped:
+            return
+        generation = self.command_arbiter.generation
         previous = self.decision
         assist_reason = self.reden if self.assist_active else None
         context = await self._build_plan_context()
+        if self._stopped or generation != self.command_arbiter.generation:
+            return
         if context is None:
-            self.set_decision(Decision(AdviceMode.NO_DATA))
+            self._data_blocked = True
+            self.assist_active = None
+            self.set_decision(Decision(
+                AdviceMode.NO_DATA, reason="plandata ontbreekt — sturing geblokkeerd"))
+            if self.control_enabled:
+                await self.emergency_stop(None)
             return
 
         # de DP kost bij kwartierstappen ~0,7 s: buiten de event loop draaien
@@ -578,6 +615,8 @@ class WattsonCoordinator:
             self.params,
             context.terminal_value,
         )
+        if self._stopped or generation != self.command_arbiter.generation:
+            return
         self._update_plan_outputs(context, evaluation)
         self.set_decision(PS.decision_from_plan(
             evaluation.setpoints[0],
@@ -587,6 +626,9 @@ class WattsonCoordinator:
             self.plan_slots,
         ))
         await self._stabilize_decision(previous, context, evaluation)
+        if self._stopped or generation != self.command_arbiter.generation:
+            return
+        self._data_blocked = False
         self._guard_suspect_ev(context)
         await self._apply_decision(context, assist_reason)
 
@@ -900,7 +942,8 @@ class WattsonCoordinator:
         assist_reason: str | None,
     ) -> None:
         """Voer één gestabiliseerd besluit uit via de command-arbiter."""
-        if not self.control_enabled or self.safety.tripped:
+        if (self._stopped or not self.control_enabled or self._data_blocked
+                or self.safety.tripped or self.safety.telemetry_blocked):
             return
         if self.ent_zd_hems:
             hems = self.hass.states.get(self.ent_zd_hems)
@@ -1020,10 +1063,11 @@ class WattsonCoordinator:
             action = BatteryAction.CHARGE
         command = self.command_arbiter.command(
             action, power_w, p1_cap=p1_cap, source=source)
-        result = await self.command_arbiter.execute(command, self._apply_command)
+        result = await self.command_arbiter.execute(
+            command, self._apply_command, allowed=self._command_allowed)
         if result.skipped:
             _LOGGER.debug(
-                "Wattson: verouderd %s-commando overgeslagen (%s)",
+                "Wattson: geblokkeerd of verouderd %s-commando overgeslagen (%s)",
                 action.value, source.value,
             )
             return None
@@ -1171,6 +1215,21 @@ class WattsonCoordinator:
         self._load_hour = hour
         self._load_samples.append(load_w)
 
+    def _command_allowed(self, command: BatteryCommand) -> bool:
+        """Laatste stuurpoort, onder het adapter-lock voor ieder schrijfpad.
+
+        Een stop blijft altijd mogelijk; na unload mag uitsluitend de eigen
+        lifecycle-stop nog schrijven. Afgewezen opdrachten veranderen ook de
+        geregistreerde accutoestand niet.
+        """
+        if self._stopped:
+            return (command.action is BatteryAction.IDLE
+                    and command.source is CommandSource.LIFECYCLE)
+        if command.action is BatteryAction.IDLE:
+            return True
+        return (self.control_enabled and not self._data_blocked
+                and not self.safety.telemetry_blocked and not self.safety.tripped)
+
     async def _apply_command(self, command: BatteryCommand) -> float:
         """Enige ongearbitreerde doorgang naar een merkadapter."""
         return await self.adapter_impl.apply(
@@ -1193,7 +1252,7 @@ class WattsonCoordinator:
             source=source,
         )
         result = await self.command_arbiter.execute(
-            command, self._apply_limit_command)
+            command, self._apply_limit_command, allowed=self._command_allowed)
         return None if result.skipped else result.applied_w
 
     async def _apply_limit_command(self, command: BatteryCommand) -> float:

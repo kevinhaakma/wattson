@@ -147,26 +147,28 @@ def test_zendure():
     sel = [d for d in hass.services.calls if d[1] == "select_option"]
     check("zendure: operation -> manual", sel and sel[-1][2]["option"] == "manual")
 
-    # Herstart-race: HA kan smart_charging herstellen terwijl de fysieke
-    # inputLimit nog 0 is. De eerste actie moet dezelfde select-optie daarom
-    # bewust opnieuw aanbieden; alleen state-vergelijking is hier onvoldoende.
+    # Een oude installatie kan smart_charging herstellen. De huidige
+    # Zendure-capabilities gebruiken manual-laden met Wattsons eigen volglus.
     hass = zendure_hass()
     hass._states["select.zd_op"] = FakeState("smart_charging", {"options": []})
     c, ad = make_zendure(hass)
-    run(ad.apply("laden_overschot", 900.0))
+    run(ad.apply("laden", 900.0))
     sel = [d for d in hass.services.calls if d[1] == "select_option"]
-    check("zendure: eerste smart-charge herbevestigt herstelde managerstand",
-          sel and sel[-1][2]["option"] == "smart_charging")
+    check("zendure: laden vervangt herstelde smart-charge door manual",
+          sel and sel[-1][2]["option"] == "manual"
+          and last_value(hass, "number.zd_manual") == -900.0)
 
-    # Een directionele noodstop sluit de inputlimiet; ook daarna moet dezelfde
-    # managerstand exact één keer opnieuw worden aangeboden.
+    # De coordinator stuurt eerst rust en sluit daarna de richting. Hervatten
+    # moet dezelfde manual-waarde opnieuw aanbieden na de modewissel.
     hass.services.calls.clear()
+    run(ad.apply("rust", 0.0))
     run(ad.emergency_stop("laden"))
     hass.services.calls.clear()
-    run(ad.apply("laden_overschot", 900.0))
+    run(ad.apply("laden", 900.0))
     sel = [d for d in hass.services.calls if d[1] == "select_option"]
-    check("zendure: smart-charge heropent richting na noodstop",
-          sel and sel[-1][2]["option"] == "smart_charging")
+    check("zendure: manual-laden wordt opnieuw aangeboden na noodstop",
+          sel and sel[-1][2]["option"] == "manual"
+          and last_value(hass, "number.zd_manual") == -900.0)
 
     # ontladen: Wattson is de enige P1-regelaar. De Zendure-manager krijgt een
     # vast manual-setpoint en mag als enige de fysieke outputLimit schrijven.
@@ -480,8 +482,8 @@ def test_telemetry_and_caps():
     z = A.create_adapter("zendure", FakeCoordinator(FakeHass({})))
     m = A.create_adapter("marstek", FakeCoordinator(FakeHass({})))
     g = A.create_adapter("generic", FakeCoordinator(FakeHass({})))
-    check("caps: zendure gebruikt Wattson P1-guard + device-limieten/surplus",
-          not z.caps.p1_matching and z.caps.device_limits and z.caps.surplus_mode
+    check("caps: zendure gebruikt eigen volglussen en device-limieten",
+          not z.caps.p1_matching and z.caps.device_limits and not z.caps.surplus_mode
           and not (m.caps.p1_matching or m.caps.device_limits or m.caps.surplus_mode)
           and not (g.caps.p1_matching or g.caps.device_limits or g.caps.surplus_mode))
     check("caps: onbekend merk valt terug op generic",

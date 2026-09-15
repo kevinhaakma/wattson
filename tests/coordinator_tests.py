@@ -46,6 +46,21 @@ _core.callback = lambda fn: fn
 _ce = _module("homeassistant.config_entries")
 _ce.ConfigEntry = type("ConfigEntry", (), {})
 _module("homeassistant.helpers")
+_storage = _module("homeassistant.helpers.storage")
+
+
+class FakeStore:
+    def __init__(self, *args):
+        self.data = None
+
+    async def async_load(self):
+        return self.data
+
+    async def async_save(self, data):
+        self.data = data
+
+
+_storage.Store = FakeStore
 _event = _module("homeassistant.helpers.event")
 _event.async_call_later = lambda hass, delay, cb: (lambda: None)
 _event.async_track_state_change_event = lambda *a, **k: (lambda: None)
@@ -87,6 +102,11 @@ CLOCK = Clock()
 C.time = CLOCK
 R.time = CLOCK
 SAF.time = CLOCK
+# Dezelfde instelbare klok voor meetleeftijd en regeltijden. Losse Windows-
+# klokmetingen kunnen identieke timestamps geven en samples laten verdwijnen.
+_dt.utcnow = lambda: datetime(2026, 9, 15, tzinfo=timezone.utc) + timedelta(seconds=CLOCK.t)
+_dt.now = _dt.utcnow
+_dt.as_local = lambda value: value.astimezone(timezone.utc)
 
 
 # ---------------------------------------------------------------------------
@@ -125,6 +145,9 @@ class FakeHass:
     def async_create_task(self, coro):
         self.pending.append(coro)
         return coro
+
+    async def async_add_executor_job(self, func, *args):
+        return func(*args)
 
 
 async def drain(hass):
@@ -175,7 +198,7 @@ def make_coordinator(*, caps=CAPS_SURPLUS, wallbox=False):
     if wallbox:
         options[K.CONF_ENT_WALLBOX_1] = "sensor.wb1"
     entry = types.SimpleNamespace(options=options)
-    c = C.WattsonCoordinator(hass, entry)
+    c = C.WattsonCoordinator(hass, entry, C.load_params())
     c.adapter_impl = FakeAdapter(c, caps)
     c.caps = caps
     # deterministische toekomst-huislast (het getrainde profiel verandert
@@ -185,7 +208,11 @@ def make_coordinator(*, caps=CAPS_SURPLUS, wallbox=False):
 
 
 def set_state(c, entity, value, attributes=None, age_s=0.0):
-    c.hass.states[entity] = FakeState(value, attributes, age_s)
+    state = FakeState(value, attributes, age_s)
+    previous = c.hass.states.get(entity)
+    if age_s == 0 and previous and previous.last_updated >= state.last_updated:
+        state.last_updated = previous.last_updated + timedelta(microseconds=1)
+    c.hass.states[entity] = state
 
 
 def set_prices(c, now_price, future_prices):
@@ -319,12 +346,11 @@ def test_demping_piek_override():
     }
 
 
-def test_zongedekte_start_omzeilt_euro_deadband():
-    """Een volledig zongedekte planstart mag niet naar een duurder uur schuiven.
+def test_zongedekte_start_volgt_euro_deadband():
+    """Ook zonladen gebruikt de huidige economische wisseldemping.
 
-    De algemene wisseldeadband blijft nuttig voor marginale netarbitrage, maar
-    de live HA-case van 17 juli had 2,23 kW bronoverschot en een 1,5 kW
-    laadadvies in het goedkoopste uur. Die fysieke start moet direct door.
+    Een zonnige laadstart met verwaarloosbaar voordeel hoeft niet onmiddellijk
+    het relais te schakelen; voldoende werkelijk planvoordeel gaat wel door.
     """
     c = make_coordinator()
     previous = CTRL.Decision(CTRL.AdviceMode.IDLE)
@@ -341,11 +367,17 @@ def test_zongedekte_start_omzeilt_euro_deadband():
         soc_kwh=0.69,
         terminal_value=0.228,
     )
-    evaluation = types.SimpleNamespace(setpoints=[1500.0, 0.0], cost=0.0)
-    c._switch_debt = K.SWITCH_DEADBAND_EUR / 2
-    c._stabilize_decision(previous, context, evaluation)
+    idle_cost, soc1, _, _ = P.hour_result(steps[0], 0, context.soc_kwh, c.params)
+    _, rest = P.plan(steps[1:], soc1, c.params, context.terminal_value)
+    evaluation = types.SimpleNamespace(setpoints=[1500.0, 0.0], cost=idle_cost + rest - 0.001)
+    run(c._stabilize_decision(previous, context, evaluation))
+    held = c.mode is CTRL.AdviceMode.IDLE and 0 < c._switch_debt < K.SWITCH_DEADBAND_EUR
+    c.set_decision(CTRL.Decision(CTRL.AdviceMode.CHARGE, 1500))
+    evaluation.cost = idle_cost + rest - K.DWELL_OVERRIDE_EUR - K.SWITCH_DEADBAND_EUR
+    run(c._stabilize_decision(previous, context, evaluation))
     return {
-        "zongedekte goedkoopste laadstart omzeilt euro-deadband":
+        "marginale zonnestart wacht op voldoende voordeel": held,
+        "zonnestart met voldoende voordeel gaat direct door":
             c.mode is CTRL.AdviceMode.CHARGE
             and c.setpoint_w == 1500.0
             and c._switch_debt == 0.0,
@@ -407,6 +439,9 @@ def test_lastsprong_guard():
     set_prices(c, 0.60, [0.05] * 6)
     run(c._tick(None))
     ok_eerst = c.advies == "ontladen"
+    # De huidige regelaar filtert losse uitschieters; het oude 600 W-sample
+    # moet uit het bronvenster zijn voordat dit als echte lastsprong telt.
+    CLOCK.t += K.ASSIST_START_CONFIRM_S + 1
     set_state(c, c.ent_p1, 4800.0)
     run(c._tick(None))
     return {
@@ -445,6 +480,7 @@ def test_overschot_downgrade():
     """Zonder native surplus-modus wordt laden_overschot een vast laden-
     commando en klopt de boekhouding met wat er echt is gestuurd."""
     c = make_coordinator(caps=CAPS_FIXED)
+    c.control_enabled = True
     run(c.set_battery("laden_overschot", 500.0))
     call = c.adapter_impl.calls[-1]
     return {
@@ -469,19 +505,26 @@ def test_surplus_peakmemory():
 
 
 def test_discharge_guard():
-    """Vast-setpoint-adapter exporteert: guard verlaagt het setpoint direct."""
+    """De huidige volglus verlaagt pas na latentie en aanhoudende export."""
     c = make_coordinator(caps=CAPS_FIXED)
     c.control_enabled = True
     c.advies = "ontladen"
-    c._last_action = "ontladen"
-    c._last_discharge_w = 800.0
+    run(c.set_battery("ontladen", 800.0, p1_cap=False))
+    c.adapter_impl.calls.clear()
     set_state(c, c.ent_p1, -200.0)
-    CLOCK.t += K.DIS_GUARD_THROTTLE_S + 1
-    c.discharge_guard.check(None)
+    c.discharge_ctl.on_p1(None)
+    before_latency = not c.hass.pending
+    CLOCK.t += K.DIS_LOOP_LATENCY_S
+    c.discharge_ctl.on_p1(None)
+    before_window = not c.hass.pending
+    CLOCK.t += K.DIS_LOOP_WINDOW_S
+    set_state(c, c.ent_p1, -200.0)
+    c.discharge_ctl.on_p1(None)
     run(drain(c.hass))
     calls = [call for call in c.adapter_impl.calls if call[0] == "ontladen"]
     return {
-        "guard verlaagt naar setpoint + P1": calls and calls[-1][1] == 600,
+        "volglus wacht op latentie en bewijsvenster": before_latency and before_window,
+        "volglus verlaagt naar setpoint + aanhoudende P1": calls and calls[-1][1] == 600,
         "guard slaat de P1-cap over (delta is al berekend)":
             calls and calls[-1][2] is False,
     }
@@ -499,6 +542,12 @@ def test_assist_start_en_stopgrace():
     ok_rust = c.advies == "rust"
 
     set_state(c, c.ent_price, 0.60, {"forecast": []})  # actuele prijs boven de vloer
+    CLOCK.t += K.ASSIST_START_CONFIRM_S + 1
+    set_state(c, c.ent_p1, 500.0)
+    c.source.sample()
+    run(c.assist.apply())
+    ok_single = c.assist_active is None
+    CLOCK.t += K.ASSIST_START_CONFIRM_S
     set_state(c, c.ent_p1, 500.0)
     run(c.assist.apply())
     ok_start = (c.assist_active == "ontladen"
@@ -515,15 +564,20 @@ def test_assist_start_en_stopgrace():
 
     # voorbij opwarmvenster: einde gemeten, maar de stop-grace moet nog lopen
     CLOCK.t += K.ASSIST_MIN_RUN_S
+    set_state(c, c.ent_p1, 10.0)
+    set_state(c, "sensor.bat_dis", 10.0)
     run(c.assist.apply())
     ok_grace = c.assist_active == "ontladen" and c.assist.end_since is not None
 
     CLOCK.t += K.ASSIST_STOP_GRACE_S + 1
+    set_state(c, c.ent_p1, 10.0)
+    set_state(c, "sensor.bat_dis", 10.0)
     run(c.assist.apply())
     ok_stop = (c.assist_active is None and c.advies == "rust"
                and c.adapter_impl.calls[-1][0] == "rust")
     return {
         "vlakke prijzen: plan blijft rust": ok_rust,
+        "losse piekmeting start geen bijspringen": ok_single,
         "piek boven de λ-vloer start bijspringen": ok_start,
         "opwarmvenster negeert vals piek-einde": ok_warmup,
         "stop-grace houdt de assist nog vast": ok_grace,
@@ -540,10 +594,10 @@ def test_export_recovery():
     run(c._tick(None))  # λ hoog: opslaan van de export is niet economisch
     c.advies = "ontladen"
     c._last_action = "ontladen"
-    c._last_discharge_w = 200.0
+    c._last_discharge_w = K.DIS_LOOP_FLOOR_W
     c.adapter_impl.calls = []
     set_state(c, c.ent_p1, -400.0)
-    set_state(c, "sensor.bat_dis", 200.0)
+    set_state(c, "sensor.bat_dis", K.DIS_LOOP_FLOOR_W)
     c.export_recovery.check(None)
     ok_timer = c.export_recovery.since is not None and not c.export_recovery.pending
     CLOCK.t += K.DISCHARGE_EXPORT_ABORT_HOLD_S + 1
@@ -563,6 +617,7 @@ def test_watchdog():
     c.control_enabled = True
     c.advies = "rust"
     set_state(c, "sensor.bat_dis", 900.0)
+    CLOCK.t += K.STARTUP_GRACE_S + 1
     run(c.safety.watchdog())
     ok_trip = (c.safety.tripped == "ontladen"
                and any(call[0] == "noodstop" for call in c.adapter_impl.calls))
@@ -571,6 +626,7 @@ def test_watchdog():
     c2.control_enabled = True
     c2.advies = "rust"
     set_state(c2, "sensor.bat_dis", 900.0)
+    CLOCK.t += K.STARTUP_GRACE_S + 1
     c2.safety.note_own_stop("ontladen")
     run(c2.safety.watchdog())
     ok_grace = c2.safety.tripped is None
@@ -631,6 +687,7 @@ def test_command_arbitrage():
 
     async def scenario():
         c = make_coordinator()
+        c.control_enabled = True
         adapter = BlockingAdapter(c, CAPS_FIXED)
         c.adapter_impl = adapter
         first = asyncio.create_task(c.set_battery("laden", 500.0))
@@ -698,7 +755,7 @@ def test_tick_serialisatie():
 
 
 def test_lifecycle_listeners():
-    """Start registreert de drie lussen; stop meldt alles af en stuurt rust."""
+    """Start registreert boekhouding en regellussen; stop meldt alles af."""
 
     async def scenario():
         c = make_coordinator()
@@ -728,7 +785,7 @@ def test_lifecycle_listeners():
             C.async_call_later = old_later
         return {
             "lifecycle registreert plan/safety/track-intervallen":
-                intervals == [K.UPDATE_MINUTES * 60,
+                intervals == [60, K.UPDATE_MINUTES * 60,
                               K.WATCH_INTERVAL_S,
                               K.TRACK_INTERVAL_S],
             "lifecycle registreert bronlisteners": bool(states),
@@ -745,7 +802,7 @@ def main():
     suites = [
         test_plan_basis, test_geen_data, test_verkopen_switch,
         test_wissel_demping, test_demping_piek_override,
-        test_zongedekte_start_omzeilt_euro_deadband,
+        test_zongedekte_start_volgt_euro_deadband,
         test_demping_stale_stand,
         test_ev_house_share, test_ev_blind_zonder_verse_wallbox,
         test_lastsprong_guard, test_ev_guard_direct, test_overschot_downgrade,

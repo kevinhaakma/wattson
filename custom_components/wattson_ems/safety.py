@@ -36,6 +36,11 @@ class Safety:
         self._safe_stopped = False
         self._started_at = time.monotonic()
 
+    @property
+    def telemetry_blocked(self) -> bool:
+        """Een stiltestop blijft gelden tot de stale-guard verse data ziet."""
+        return self._safe_stopped
+
     def note_own_stop(self, richting: str) -> None:
         """Eigen stopcommando geregistreerd: het apparaat loopt (cloud-latentie)
         nog even uit in de oude richting — dat is geen runaway."""

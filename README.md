@@ -7,7 +7,7 @@
 **Explainable smart home battery control for Home Assistant**
 
 [![HACS Custom](https://img.shields.io/badge/HACS-Custom-1565C0.svg?style=for-the-badge)](https://github.com/hacs/integration)
-[![Version](https://img.shields.io/badge/version-3.1.2-00B4B0.svg?style=for-the-badge)](#)
+[![Version](https://img.shields.io/badge/version-3.4.1-00B4B0.svg?style=for-the-badge)](#)
 [![License](https://img.shields.io/badge/license-MIT-1565C0.svg?style=for-the-badge)](#)
 [![Maintained](https://img.shields.io/badge/maintained-yes-22C55E.svg?style=for-the-badge)](#)
 
@@ -248,7 +248,8 @@ adapter's declared capabilities rather than its name:
   `python tests/contract_tests.py`, `python tests/planner_tests.py`,
   `python tests/control_logic_tests.py`, `python tests/scenario_tests.py`,
   `python tests/coordinator_tests.py`, and
-  `python tests/ha_data_scenario_tests.py`. They
+  `python tests/ha_data_scenario_tests.py`, and
+  `python tests/safety_regression_tests.py`. They
   exercise command translation, P1 capping, unit conversion (W/kW/MW),
   emergency stops, stale telemetry, cumulative reserve calculation,
   solar-backed budgeting, ineffective boundary actions, EV at-home gates, and
@@ -410,7 +411,12 @@ in an ineffective charge/discharge state.
 - **Adapter-routed emergency stop.** Every adapter receives its own idle/stop
   command. Zendure additionally closes the affected device-level limit.
 - **Stale-data guard.** If all relevant telemetry remains stale for ten minutes
-  while control is enabled, Wattson performs a one-time safe stop.
+  while control is enabled, Wattson performs a safe stop. Active commands from
+  both planning and real-time control remain blocked until the guard observes
+  fresh battery telemetry. The advice sensor's `fout` attribute shows the block.
+- **Missing planning data.** If a planning cycle cannot read the battery SoC or
+  usable prices, active control stops the battery and blocks further active
+  commands. A new successful planning cycle clears this block.
 - **Idle enforcement.** Zendure limits are closed when fresh telemetry proves
   the battery remains active after an idle command.
 - **EV guard.** Discharge and selling stop when a configured EV charger becomes
@@ -423,7 +429,9 @@ in an ineffective charge/discharge state.
   (Zendure), preventing the battery from trickling ~50 W into the home while
   it is supposed to rest.
 - **Safe unload.** Reloading or unloading the integration cancels retries and
-  commands the battery to idle.
+  commands the battery to idle. The old instance rejects further commands,
+  including results from calculations that were already running. Command
+  permission is checked again after waiting for any preceding adapter write.
 - **Range clamping.** Values sent to number entities are clamped to their native
   minimum and maximum.
 
@@ -472,6 +480,19 @@ or correct operation of connected equipment.
 <div align="center">
 <sub>Built with a local pure-Python rolling-horizon planner — no cloud and no runtime dependencies.</sub>
 </div>
+
+## v3.4.1 — persistent safety stops and safe unload
+
+- Missing planning data explicitly stops the battery and blocks active commands
+  until a successful plan is available again.
+- A stale-telemetry stop blocks planning and real-time commands until fresh
+  battery telemetry returns. The advice sensor exposes the reason.
+- Unload rejects late callbacks and results from in-flight planning. Command
+  permission is rechecked inside the adapter lock.
+- Startup reads packaged parameters in a worker thread instead of blocking
+  Home Assistant's event loop.
+- Standalone tests cover stop/recovery and concurrent planning/adapter writes;
+  older tests now exercise the current controllers and planner resolution.
 
 ## v3.1.2 — time-consistent planning and safe restart
 

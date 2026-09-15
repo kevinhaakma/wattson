@@ -155,9 +155,14 @@ class CommandArbiter:
         self,
         command: BatteryCommand,
         apply: Callable[[BatteryCommand], Awaitable[float]],
+        *,
+        allowed: Callable[[BatteryCommand], bool] | None = None,
     ) -> CommandResult:
         async with self._lock:
-            if command.generation != self._generation:
+            # Toestemming kan veranderen terwijl het commando op een vorige
+            # adapter-write wacht. Controleer daarom pas binnen het lock.
+            if (command.generation != self._generation
+                    or (allowed is not None and not allowed(command))):
                 result = CommandResult(command, 0.0, skipped=True)
             else:
                 result = CommandResult(command, float(await apply(command)))

@@ -50,6 +50,9 @@ def planner_params():
         beta=0.04,
         risk_k=0.05,
         risk_steps=tuple(PARAMS["risk_shape_steps"]),
+        # Zelfde SoC-resolutie als de coordinator; het oude raster van
+        # 0,08 kWh maskeert de kleine prijsverschillen van dit scenario.
+        soc_step_kwh=PARAMS.get("soc_step_kwh", 0.02),
     )
 
 
