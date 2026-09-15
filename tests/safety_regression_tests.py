@@ -94,6 +94,49 @@ class SafetyRegressions(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(c._last_charge_w, 0)
         self.assertIsNone(c.last_error)
 
+    async def test_idle_stale_stop_does_not_deadlock_next_command(self):
+        """15-09-2026: accu in rust -> write-on-change-telemetrie staat stil ->
+        stiltestop -> elk nieuw commando geweigerd -> nooit meer verse data.
+        Een stop in rust mag limieten dichtzetten, maar niet blokkeren."""
+        c = self.coordinator()
+        c._last_action = "rust"
+        await self.stale_stop(c)
+        self.assertEqual(c.adapter_impl.calls[-1][0], "noodstop")
+        self.assertFalse(c.safety.telemetry_blocked)
+        self.assertIsNone(c.last_error)
+        # telemetrie nog steeds oud, maar het plan mag nu gewoon sturen
+        await c._tick(None)
+        self.assertEqual(c.adapter_impl.calls[-1][0], "laden")
+        self.assertGreater(c._last_charge_w, 0)
+        # direct daarna geen herhaalde stop: het meetvenster loopt vanaf het commando
+        calls_after_cmd = list(c.adapter_impl.calls)
+        await c.safety.stale_guard()
+        self.assertEqual(c.adapter_impl.calls, calls_after_cmd)
+        self.assertFalse(c.safety.telemetry_blocked)
+
+    async def test_active_command_after_idle_stop_must_yield_fresh_data(self):
+        """Blijft de telemetrie ook ná het doorgelaten commando stil, dan is
+        dat een echte actieve stilte: opnieuw stoppen, nu wél blokkerend."""
+        c = self.coordinator()
+        c._last_action = "rust"
+        await self.stale_stop(c)
+        await c._tick(None)
+        self.assertEqual(c.adapter_impl.calls[-1][0], "laden")
+        H.CLOCK.t += 1200
+        H.set_state(c, c.ent_soc, 25, age_s=4800)
+        await c.safety.stale_guard()
+        self.assertEqual(c.adapter_impl.calls[-1][0], "noodstop")
+        self.assertTrue(c.safety.telemetry_blocked)
+        self.assertIn("telemetrie stil", c.last_error)
+        self.assertIsNone(await c.set_battery("laden", 800))
+        # verse data heft ook deze stop weer op (prijzen opnieuw op het
+        # verschoven klokuur zetten, anders plant hij terecht rust)
+        H.set_state(c, c.ent_soc, 26)
+        H.set_prices(c, 0.05, [0.40] * 6)
+        await c._tick(None)
+        self.assertEqual(c.adapter_impl.calls[-1][0], "laden")
+        self.assertIsNone(c.last_error)
+
     async def test_missing_soc_or_prices_stops_and_recovers(self):
         for entity_kind in ("soc", "price"):
             with self.subTest(source=entity_kind):

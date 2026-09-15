@@ -34,12 +34,23 @@ class Safety:
         self._stopped_richting: str | None = None  # ...deze richting geen runaway
         self._data_ok_at: datetime | None = None
         self._safe_stopped = False
+        # Stiltestop tijdens ACTIEVE sturing (laden/ontladen/verkopen): dan
+        # weten we echt niet wat het apparaat doet -> commando's blokkeren.
+        # Stiltestop in rust is alleen idle-hardening (limieten dicht): de
+        # write-on-change-telemetrie staat dan per definitie stil, en een nieuw
+        # commando is juist het enige dat weer verse data kan opleveren.
+        self._stopped_while_active = False
+        self._safe_stop_at: datetime | None = None
         self._started_at = time.monotonic()
 
     @property
     def telemetry_blocked(self) -> bool:
-        """Een stiltestop blijft gelden tot de stale-guard verse data ziet."""
-        return self._safe_stopped
+        """Een stiltestop tijdens actieve sturing blijft gelden tot de
+        stale-guard verse data ziet. Een stop in rust blokkeert niet (zie
+        __init__): anders ontstaat een deadlock waarin het commando dat verse
+        data zou opleveren zelf wordt geweigerd (15-09-2026: 3,5 uur geen
+        verkoop bij €0,45 met een volle accu)."""
+        return self._safe_stopped and self._stopped_while_active
 
     def note_own_stop(self, richting: str) -> None:
         """Eigen stopcommando geregistreerd: het apparaat loopt (cloud-latentie)
@@ -146,10 +157,22 @@ class Safety:
         if vers:
             self._data_ok_at = now
             self._safe_stopped = False
+            self._stopped_while_active = False
             return
         if self._data_ok_at is None:
             self._data_ok_at = now
             return
+        actief = c._last_action in ("laden", "laden_overschot", "ontladen", "verkopen")
+        cmd_at = getattr(c, "_last_command_at", None)
+        # Na een stop in rust is een nieuw ACTIEF commando doorgelaten: dat
+        # opent een nieuw meetvenster vanaf het commando. Levert het apparaat
+        # binnen GEENDATA_STOP_S geen verse data, dan volgt opnieuw een stop —
+        # nu wél als blokkerende actieve-stop.
+        if (self._safe_stopped and actief and cmd_at is not None
+                and self._safe_stop_at is not None and cmd_at >= self._safe_stop_at):
+            self._safe_stopped = False
+            self._stopped_while_active = False
+            self._data_ok_at = cmd_at
         stil = (now - self._data_ok_at).total_seconds()
         # Herladen alleen als de integratie écht niets meer MELDT (last_reported),
         # niet als de waarden alleen constant zijn (last_updated staat dan ook
@@ -159,11 +182,9 @@ class Safety:
         # Alleen herladen als er een ACTIEF commando staat dat niet terugkomt:
         # in rust zijn constante waarden normaal (06-09 15:17/15:32: reload elke
         # 15 min in rust, elke reload = relaisklik).
-        actief = c._last_action in ("laden", "laden_overschot", "ontladen", "verkopen")
         # ...en dat commando moet zelf al GEENDATA_RELOAD_S oud zijn: stilte uit de
         # rustperiode ervoor telt niet (06-09 18:00: reload op het startmoment van
         # de ontlading -> integratie 3 min weg, klik, late start)
-        cmd_at = getattr(c, "_last_command_at", None)
         cmd_oud = cmd_at is not None and (now - cmd_at).total_seconds() > GEENDATA_RELOAD_S
         last_reload = getattr(self, "_last_reload_at", None)
         if (stil > GEENDATA_RELOAD_S and stil_melding and actief and cmd_oud and c.ent_soc
@@ -177,12 +198,19 @@ class Safety:
                 _LOGGER.exception("Wattson: herladen accu-integratie faalde")
         if not self._safe_stopped and stil > GEENDATA_STOP_S:
             self._safe_stopped = True
+            self._stopped_while_active = actief
+            self._safe_stop_at = now
             c.assist_active = None
             await c.emergency_stop(None)
-            c.reden = "telemetrie stil — veilig gestopt"
+            if actief:
+                c.reden = "telemetrie stil — veilig gestopt"
+                bericht = f"telemetrie > {GEENDATA_STOP_S / 60:.0f} min stil: accu veilig gestopt"
+            else:
+                c.reden = "telemetrie stil in rust — limieten dicht"
+                bericht = (f"telemetrie > {GEENDATA_STOP_S / 60:.0f} min stil in rust: "
+                           "limieten dicht, nieuw commando blijft mogelijk")
             c.hass.bus.async_fire("logbook_entry", {
-                "name": "Wattson",
-                "message": f"telemetrie > {GEENDATA_STOP_S / 60:.0f} min stil: accu veilig gestopt",
+                "name": "Wattson", "message": bericht,
                 "entity_id": "sensor.wattson_advies", "domain": "wattson_ems"})
 
     async def tick(self) -> None:
