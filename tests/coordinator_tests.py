@@ -798,6 +798,71 @@ def test_lifecycle_listeners():
     return run(scenario())
 
 
+def test_aflopend_commando_verversen():
+    """Marstek-passive-achtige adapters: aflopend commando wordt via de
+    arbiter herhaald zolang sturing aan staat; na stop/trip verloopt het."""
+
+    class ExpiringAdapter(FakeAdapter):
+        def __init__(self, c, caps):
+            super().__init__(c, caps)
+            self.expiring = False
+
+        def needs_refresh(self):
+            return self.expiring
+
+    async def scenario():
+        c = make_coordinator(caps=CAPS_FIXED)
+        adapter = ExpiringAdapter(c, CAPS_FIXED)
+        c.adapter_impl = adapter
+        c.control_enabled = True
+        await c.set_battery("ontladen", 300.0, p1_cap=False)
+        adapter.calls.clear()
+
+        await c._refresh_expiring_command()
+        geen_refresh_vers = adapter.calls == []
+
+        adapter.expiring = True
+        await c._refresh_expiring_command()
+        herhaald = adapter.calls == [("ontladen", 300, False)]
+        adapter.calls.clear()
+
+        # rust wordt ook ververst: de accu moet stil blijven zolang het plan dat wil
+        await c.set_battery("rust", 0.0)
+        adapter.calls.clear()
+        await c._refresh_expiring_command()
+        rust_herhaald = adapter.calls == [("rust", 0, False)]
+        adapter.calls.clear()
+
+        # sturing uit -> niets herhalen; het commando verloopt op het apparaat
+        c.control_enabled = False
+        await c._refresh_expiring_command()
+        uit_niets = adapter.calls == []
+
+        # na unload ook niet, zelfs met sturing 'aan' in de oude boekhouding
+        c.control_enabled = True
+        c._stopped = True
+        await c._refresh_expiring_command()
+        gestopt_niets = adapter.calls == []
+
+        # trip: ontladen wordt niet herhaald (stuurpoort dicht), rust wel toegestaan
+        c._stopped = False
+        c.safety.tripped = "ontladen"
+        c._last_action = CTRL.BatteryAction.DISCHARGE
+        c._last_discharge_w = 300.0
+        await c._refresh_expiring_command()
+        trip_niets = adapter.calls == []
+        return {
+            "vers commando wordt niet herhaald": geen_refresh_vers,
+            "aflopend ontladen wordt via de arbiter herhaald": herhaald,
+            "aflopende rust wordt herhaald": rust_herhaald,
+            "sturing uit: commando verloopt op het apparaat": uit_niets,
+            "na unload wordt niets meer herhaald": gestopt_niets,
+            "na trip wordt actief sturen niet herhaald": trip_niets,
+        }
+
+    return run(scenario())
+
+
 def main():
     suites = [
         test_plan_basis, test_geen_data, test_verkopen_switch,
@@ -809,7 +874,7 @@ def main():
         test_surplus_peakmemory, test_discharge_guard,
         test_assist_start_en_stopgrace, test_export_recovery, test_watchdog,
         test_typed_decision, test_command_arbitrage, test_tick_serialisatie,
-        test_lifecycle_listeners,
+        test_lifecycle_listeners, test_aflopend_commando_verversen,
     ]
     failed = []
     total = 0

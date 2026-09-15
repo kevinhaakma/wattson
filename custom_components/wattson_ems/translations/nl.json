@@ -47,7 +47,10 @@
           "ent_gen_charge": "Generiek laadvermogen",
           "ent_gen_discharge": "Generiek ontlaadvermogen",
           "ent_bat_chg": "Gemeten laadvermogen accu (optioneel)",
-          "ent_bat_dis": "Gemeten ontlaadvermogen accu (optioneel)"
+          "ent_bat_dis": "Gemeten ontlaadvermogen accu (optioneel)",
+          "ent_ms_rs485": "Marstek RS485-control-mode-switch (optioneel, register 42000)",
+          "ms_device_id": "Marstek-accu (apparaat van de Local-API-integratie)",
+          "ms_service": "Marstek Local-API-integratie (auto = set_passive_mode detecteren)"
         }
       },
       "battery": {
@@ -69,7 +72,8 @@
       "invalid_number": "Eén van de numerieke waarden is geen geldig getal.",
       "must_be_positive": "Moet groter zijn dan nul.",
       "soc_out_of_range": "Het minimale laadniveau moet tussen 0 en 100% liggen.",
-      "generic_power_missing": "Kies één signed vermogen-entiteit, of zowel een laad- als ontlaadentiteit."
+      "generic_power_missing": "Kies één signed vermogen-entiteit, of zowel een laad- als ontlaadentiteit.",
+      "marstek_device_missing": "Marstek Local API heeft het accu-apparaat nodig."
     },
     "abort": {
       "single_instance_allowed": "Wattson is al geconfigureerd. Er kan maar één instantie tegelijk actief zijn."
@@ -119,7 +123,10 @@
           "ent_export_totalen": "Totaaltellers export (jaarsaldering-bewaking, optioneel)",
           "ent_pv_uur_nu": "PV-forecast dit uur (kWh, optioneel)",
           "ent_pv_uur_volgend": "PV-forecast volgend uur (kWh, optioneel)",
-          "ent_kalibratie": "Geplande accu-kalibratie (datetime, optioneel)"
+          "ent_kalibratie": "Geplande accu-kalibratie (datetime, optioneel)",
+          "ent_ms_rs485": "Marstek RS485-control-mode-switch (optioneel, register 42000)",
+          "ms_device_id": "Marstek-accu (apparaat van de Local-API-integratie)",
+          "ms_service": "Marstek Local-API-integratie (auto = set_passive_mode detecteren)"
         }
       }
     },
@@ -127,7 +134,8 @@
       "invalid_number": "Eén van de numerieke waarden is geen geldig getal.",
       "must_be_positive": "Moet groter zijn dan nul.",
       "soc_out_of_range": "Minimale SoC moet tussen 0 en 100% liggen.",
-      "generic_power_missing": "De generieke adapter heeft een signed vermogen-number nodig, óf zowel een laad- als een ontlaad-number."
+      "generic_power_missing": "De generieke adapter heeft een signed vermogen-number nodig, óf zowel een laad- als een ontlaad-number.",
+      "marstek_device_missing": "Marstek Local API heeft het accu-apparaat nodig."
     }
   }
 }

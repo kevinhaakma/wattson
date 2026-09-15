@@ -15,6 +15,7 @@ from homeassistant.helpers import selector
 from .const import (
     ADAPTER_GENERIC,
     ADAPTER_MARSTEK,
+    ADAPTER_MARSTEK_LOCAL,
     ADAPTER_ZENDURE,
     ADAPTERS,
     CONF_ADAPTER,
@@ -27,6 +28,11 @@ from .const import (
     CONF_ENT_MS_CHARGE,
     CONF_ENT_MS_DISCHARGE,
     CONF_ENT_MS_MODE,
+    CONF_ENT_MS_RS485,
+    CONF_MS_DEVICE_ID,
+    CONF_MS_SERVICE,
+    MS_SERVICE_AUTO,
+    MS_SERVICE_DOMAINS,
     CONF_ENT_P1,
     CONF_ENT_PRICE,
     CONF_ENT_CALIBRATION,
@@ -72,7 +78,8 @@ _OPTIONAL_ENTITY_KEYS = {
         CONF_ENT_PV_HOUR_NOW, CONF_ENT_PV_HOUR_NEXT, CONF_ENT_CALIBRATION,
     ],  # adapter-onafhankelijk
     ADAPTER_ZENDURE: [CONF_ENT_ZD_ACMODE, CONF_ENT_ZD_HEMS, CONF_ENT_ZD_SOCSET, CONF_ENT_ZD_CHG, CONF_ENT_ZD_DIS],
-    ADAPTER_MARSTEK: [CONF_ENT_BAT_CHG, CONF_ENT_BAT_DIS],
+    ADAPTER_MARSTEK: [CONF_ENT_MS_RS485, CONF_ENT_BAT_CHG, CONF_ENT_BAT_DIS],
+    ADAPTER_MARSTEK_LOCAL: [CONF_ENT_BAT_CHG, CONF_ENT_BAT_DIS],
     ADAPTER_GENERIC: [
         CONF_ENT_GEN_POWER, CONF_ENT_GEN_CHARGE, CONF_ENT_GEN_DISCHARGE,
         CONF_ENT_BAT_CHG, CONF_ENT_BAT_DIS,
@@ -141,6 +148,20 @@ def _adapter_schema(options: dict) -> vol.Schema:
             _field(options, CONF_ENT_MS_MODE, ["select", "number"]),
             _field(options, CONF_ENT_MS_CHARGE, "number"),
             _field(options, CONF_ENT_MS_DISCHARGE, "number"),
+            _field(options, CONF_ENT_MS_RS485, "switch", required=False),
+            _field(options, CONF_ENT_BAT_CHG, "sensor", required=False),
+            _field(options, CONF_ENT_BAT_DIS, "sensor", required=False),
+        ]
+    elif adapter == ADAPTER_MARSTEK_LOCAL:
+        device_kwargs = {"default": _value(options, CONF_MS_DEVICE_ID)}             if _value(options, CONF_MS_DEVICE_ID) else {}
+        pairs += [
+            (vol.Required(CONF_MS_DEVICE_ID, **device_kwargs),
+             selector.DeviceSelector(selector.DeviceSelectorConfig())),
+            (vol.Required(CONF_MS_SERVICE,
+                          default=_value(options, CONF_MS_SERVICE) or MS_SERVICE_AUTO),
+             selector.SelectSelector(selector.SelectSelectorConfig(
+                 options=[MS_SERVICE_AUTO, *MS_SERVICE_DOMAINS],
+                 mode=selector.SelectSelectorMode.DROPDOWN))),
             _field(options, CONF_ENT_BAT_CHG, "sensor", required=False),
             _field(options, CONF_ENT_BAT_DIS, "sensor", required=False),
         ]
@@ -228,6 +249,8 @@ def _validate(merged: dict) -> dict[str, str]:
         has_pair = bool(merged.get(CONF_ENT_GEN_CHARGE)) and bool(merged.get(CONF_ENT_GEN_DISCHARGE))
         if not (has_signed or has_pair):
             errors["base"] = "generic_power_missing"
+    if adapter == ADAPTER_MARSTEK_LOCAL and not merged.get(CONF_MS_DEVICE_ID):
+        errors["base"] = "marstek_device_missing"
     return errors
 
 
@@ -270,11 +293,11 @@ class WattsonConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             errors = _validate(self._setup_options)
             # Numerieke defaults zijn hier al geldig; alleen een generic
             # combinatie kan op deze stap een cross-field-fout opleveren.
-            if errors.get("base") == "generic_power_missing":
+            if errors.get("base") in ("generic_power_missing", "marstek_device_missing"):
                 return self.async_show_form(
                     step_id="adapter",
                     data_schema=_adapter_schema(self._setup_options),
-                    errors={"base": "generic_power_missing"},
+                    errors={"base": errors["base"]},
                 )
             return await self.async_step_battery()
         return self.async_show_form(

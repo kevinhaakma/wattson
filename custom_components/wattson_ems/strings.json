@@ -47,7 +47,10 @@
           "ent_gen_charge": "Generic charge power",
           "ent_gen_discharge": "Generic discharge power",
           "ent_bat_chg": "Measured battery charge power (optional)",
-          "ent_bat_dis": "Measured battery discharge power (optional)"
+          "ent_bat_dis": "Measured battery discharge power (optional)",
+          "ent_ms_rs485": "Marstek RS485 control mode switch (optional, register 42000)",
+          "ms_device_id": "Marstek battery (device of the Local API integration)",
+          "ms_service": "Marstek Local API integration (auto = detect set_passive_mode)"
         }
       },
       "battery": {
@@ -69,7 +72,8 @@
       "invalid_number": "One of the numeric values is not a valid number.",
       "must_be_positive": "Must be greater than zero.",
       "soc_out_of_range": "Minimum SoC must be between 0 and 100%.",
-      "generic_power_missing": "Choose a signed power entity, or both charge and discharge entities."
+      "generic_power_missing": "Choose a signed power entity, or both charge and discharge entities.",
+      "marstek_device_missing": "Marstek Local API needs the battery device."
     },
     "abort": {
       "single_instance_allowed": "Wattson is already configured. Only one instance is allowed."
@@ -119,7 +123,10 @@
           "ent_export_totalen": "Grid export total counters (yearly netting guard, optional)",
           "ent_pv_uur_nu": "PV-forecast dit uur (kWh, optioneel)",
           "ent_pv_uur_volgend": "PV-forecast volgend uur (kWh, optioneel)",
-          "ent_kalibratie": "Geplande accu-kalibratie (datetime, optioneel)"
+          "ent_kalibratie": "Geplande accu-kalibratie (datetime, optioneel)",
+          "ent_ms_rs485": "Marstek RS485 control mode switch (optional, register 42000)",
+          "ms_device_id": "Marstek battery (device of the Local API integration)",
+          "ms_service": "Marstek Local API integration (auto = detect set_passive_mode)"
         }
       }
     },
@@ -127,7 +134,8 @@
       "invalid_number": "One of the numeric values is not a valid number.",
       "must_be_positive": "Must be greater than zero.",
       "soc_out_of_range": "Minimum SoC must be between 0 and 100%.",
-      "generic_power_missing": "Generic adapter needs a signed power number, or both a charge and a discharge number."
+      "generic_power_missing": "Generic adapter needs a signed power number, or both a charge and a discharge number.",
+      "marstek_device_missing": "Marstek Local API needs the battery device."
     }
   }
 }

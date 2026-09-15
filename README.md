@@ -7,7 +7,7 @@
 **Explainable smart home battery control for Home Assistant**
 
 [![HACS Custom](https://img.shields.io/badge/HACS-Custom-1565C0.svg?style=for-the-badge)](https://github.com/hacs/integration)
-[![Version](https://img.shields.io/badge/version-3.4.1-00B4B0.svg?style=for-the-badge)](#)
+[![Version](https://img.shields.io/badge/version-3.5.0-00B4B0.svg?style=for-the-badge)](#)
 [![License](https://img.shields.io/badge/license-MIT-1565C0.svg?style=for-the-badge)](#)
 [![Maintained](https://img.shields.io/badge/maintained-yes-22C55E.svg?style=for-the-badge)](#)
 
@@ -34,8 +34,8 @@ inputs used by the planner.
   Deliberate export requires the separate selling switch and price threshold.
 - **EV guard.** Battery discharge and selling stop immediately when a configured
   EV charger starts drawing power.
-- **Multi-brand control.** Built-in adapters support Zendure, Marstek, and
-  generic number-based battery controls.
+- **Multi-brand control.** Built-in adapters support Zendure, Marstek (Local
+  API and RS485/Modbus), and generic number-based battery controls.
 - **Live peak and solar assistance.** An optional real-time layer responds to
   unexpected demand peaks and surplus solar. It can also use conservatively
   forecast solar that would otherwise no longer fit in the battery to reduce
@@ -62,7 +62,8 @@ Only one Wattson instance is required for one battery and one planner.
 The four-step setup wizard creates the integration only after all required
 measurements and control entities have been selected:
 
-1. **Battery adapter** — Zendure, Marstek, or Generic.
+1. **Battery adapter** — Zendure, Marstek (Local API), Marstek (RS485/Modbus),
+   or Generic.
 2. **Measurements and forecasts** — price, state of charge, grid power, and
    optional EV/PV sources.
 3. **Battery control** — the adapter-specific entities Wattson is allowed to
@@ -172,22 +173,57 @@ update before enabling active control.
 
 ### Marstek
 
-The Marstek adapter targets a Venus E/A/D through RS485/Modbus, for example
-using the
+Wattson ships two Marstek adapters. Pick the one that matches how the battery
+is connected to Home Assistant.
+
+#### Marstek (Local API)
+
+For a Venus C/D/E connected over Wi-Fi through the Marstek **Local API**
+(UDP port 30000, enabled in the Marstek app under Open API). Works with the
+HACS integrations
+[jaapp/ha-marstek-local-api](https://github.com/jaapp/ha-marstek-local-api)
+(and its Flodesirat fork) and
+[taurgis/has-marstek-local-api](https://github.com/taurgis/has-marstek-local-api).
+Wattson controls the battery through the integration's `set_passive_mode`
+service: one signed power value (positive discharges, negative charges) plus a
+countdown.
+
+Configure:
+
+- the battery **device** of the Local API integration;
+- the integration domain, or leave it on `auto` (Wattson detects which
+  integration provides `set_passive_mode`);
+- optional measured charge and discharge power sensors (for example
+  `battery_power_in` / `battery_power_out`).
+
+Every command, including rest, is sent with a 15-minute countdown and
+refreshed every 5 minutes while control is enabled. That countdown is a
+dead man's switch: if Wattson stops, is unloaded, trips, or blocks itself,
+nothing is refreshed and the battery returns to its own operating mode within
+15 minutes. Note that the Local API integrations poll telemetry at 60 s, so
+Wattson's watchdog sees battery power with that delay. Venus E 2.0 units do
+not offer the Local API.
+
+#### Marstek (RS485/Modbus)
+
+For a Venus E/A/D controlled through RS485/Modbus, for example using
+[ViperRNMC/marstek_venus_modbus](https://github.com/ViperRNMC/marstek_venus_modbus),
+the
 [LilyGO ESPHome configuration](https://github.com/whyisthisbroken/marstek-lilygo-rs485)
 or the
 [Home Assistant Modbus configuration](https://github.com/reschcloud/marstek_venus_e_modbus_home_assistant).
 
 Configure:
 
-- a force-mode `select`, or a numeric mode entity using `0 = stop`,
-  `1 = charge`, and `2 = discharge`;
-- forced charge power;
-- forced discharge power;
+- a force-mode `select` (labels such as None/Charge/Discharge or Dutch
+  equivalents), or a numeric mode entity using `0 = stop`, `1 = charge`, and
+  `2 = discharge` (register 42010);
+- forced charge power (register 42020);
+- forced discharge power (register 42021);
+- optionally the RS485 control mode `switch` (register 42000): the battery
+  silently ignores force registers while RS485 control is off, so Wattson
+  turns the switch on before its first command when it finds it off;
 - optional measured charge and discharge power sensors.
-
-English and Dutch mode labels are recognized. RS485 control mode must be
-enabled on the battery before it will accept commands.
 
 ### Generic
 
@@ -480,6 +516,18 @@ or correct operation of connected equipment.
 <div align="center">
 <sub>Built with a local pure-Python rolling-horizon planner — no cloud and no runtime dependencies.</sub>
 </div>
+
+## v3.5.0 — Marstek Local API adapter
+
+- New `marstek_local` adapter for Venus batteries on the Marstek Local API
+  (jaapp / Flodesirat / taurgis HACS integrations) via `set_passive_mode`:
+  signed power plus countdown. The integration domain is auto-detected.
+- Expiring commands are refreshed from the 60-second watch loop through the
+  command arbiter; rest is refreshed too. Without refresh (stop, unload, trip,
+  data block) the countdown returns the battery to its own mode.
+- Marstek RS485/Modbus adapter: optional RS485 control mode switch (register
+  42000) is turned on before the first command when it is off.
+- Contract and coordinator tests for both paths.
 
 ## v3.4.1 — persistent safety stops and safe unload
 

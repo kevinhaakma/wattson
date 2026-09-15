@@ -57,6 +57,9 @@ from .const import (
     CONF_ENT_GEN_POWER,
     CONF_ENT_MS_CHARGE,
     CONF_ENT_MS_DISCHARGE,
+    CONF_ENT_MS_RS485,
+    CONF_MS_DEVICE_ID,
+    CONF_MS_SERVICE,
     CONF_ENT_MS_MODE,
     CONF_ENT_P1,
     CONF_ENT_PRICE,
@@ -169,6 +172,9 @@ class WattsonCoordinator:
         self.ent_ms_mode = o(CONF_ENT_MS_MODE)
         self.ent_ms_charge = o(CONF_ENT_MS_CHARGE)
         self.ent_ms_discharge = o(CONF_ENT_MS_DISCHARGE)
+        self.ent_ms_rs485 = o(CONF_ENT_MS_RS485)
+        self.ms_device_id = o(CONF_MS_DEVICE_ID)
+        self.ms_service = o(CONF_MS_SERVICE)
         self.ent_bat_chg = o(CONF_ENT_BAT_CHG)
         self.ent_bat_dis = o(CONF_ENT_BAT_DIS)
 
@@ -475,6 +481,29 @@ class WattsonCoordinator:
 
     async def _safety_tick(self, _now) -> None:
         await self.safety.tick()
+        await self._refresh_expiring_command()
+
+    async def _refresh_expiring_command(self) -> None:
+        """Herhaal een aflopend apparaatcommando (Marstek passive cd_time).
+
+        Loopt via de arbiter en dezelfde stuurpoort als elk ander commando:
+        na een stop, trip of blokkade wordt niets herhaald en verloopt het
+        commando op het apparaat vanzelf — de accu wordt dan weer autonoom.
+        """
+        if self._stopped or not self.control_enabled or self._last_action is None:
+            return
+        needs_refresh = getattr(self.adapter_impl, "needs_refresh", None)
+        if needs_refresh is None or not needs_refresh():
+            return
+        action = BatteryAction.parse(self._last_action)
+        power = self._last_charge_w if action.is_charge else self._last_discharge_w
+        command = self.command_arbiter.command(
+            action, power, p1_cap=False, source=CommandSource.LIFECYCLE)
+        result = await self.command_arbiter.execute(
+            command, self._apply_command, allowed=self._command_allowed)
+        if not result.skipped:
+            _LOGGER.debug("Wattson: aflopend %s-commando ververst (%.0f W)",
+                          action.value, result.applied_w)
 
     # ---------- kern ----------
     async def _tick(self, _now) -> None:

@@ -14,6 +14,7 @@ registreren in `create_adapter`, en de contract-suite groen draaien.
 """
 import logging
 import math
+import time
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -253,6 +254,15 @@ class BatteryAdapter:
     async def enforce_rest(self) -> None:
         return None
 
+    def needs_refresh(self) -> bool:
+        """Verloopt het laatste commando vanzelf op het apparaat?
+
+        Adapters met een aflopend commando (Marstek passive cd_time) geven
+        True zodra het tijd is om hetzelfde commando opnieuw te sturen; de
+        coordinator doet dat via de arbiter in zijn bewakingslus.
+        """
+        return False
+
     def telemetry_entities(self):
         return (self.c.ent_bat_chg, self.c.ent_bat_dis)
 
@@ -417,6 +427,19 @@ class MarstekAdapter(BatteryAdapter):
     caps = AdapterCaps(p1_matching=False, device_limits=False, surplus_mode=False,
                        control_latency_s=1.0, min_setpoint_w=50.0)
 
+    async def _ensure_rs485_control(self) -> None:
+        """Register 42000: zonder RS485-control negeert de Venus alle
+        force-registers stilzwijgend. Alleen aanzetten als hij uit staat."""
+        c = self.c
+        ent = getattr(c, "ent_ms_rs485", "")
+        if not ent:
+            return
+        st = c.hass.states.get(ent)
+        if st is not None and st.state == "off":
+            _LOGGER.info("Wattson: RS485-control-mode stond uit — aanzetten (%s)", ent)
+            await c.hass.services.async_call(
+                "switch", "turn_on", {"entity_id": ent}, blocking=True)
+
     async def apply(self, action, power_w, *, p1_cap=True):
         c = self.c
         if action == "ontladen" and p1_cap:
@@ -424,6 +447,8 @@ class MarstekAdapter(BatteryAdapter):
         if action == "verkopen":
             # verkopen = ontladen zonder P1-cap
             power_w = min(power_w, c.params.p_discharge_max_w)
+        if action != "rust":
+            await self._ensure_rs485_control()
         # eerst het vermogen zetten, dan de mode (volgorde die het apparaat verwacht)
         if action == "laden" and c.ent_ms_charge:
             await set_power_number(c.hass, c.ent_ms_charge, power_w)
@@ -461,6 +486,84 @@ class MarstekAdapter(BatteryAdapter):
         return power_w if action in ("ontladen", "verkopen", "laden") else 0.0
 
 
+class MarstekLocalAdapter(BatteryAdapter):
+    """Marstek Venus via de Local API (UDP, HACS-integraties
+    jaapp/ha-marstek-local-api, Flodesirat-fork, taurgis/has-marstek-local-api).
+
+    Sturing loopt via één service: `<domein>.set_passive_mode` met device_id,
+    een signed vermogen (+ = ontladen, - = laden; let op: tegengesteld aan de
+    generieke number-conventie) en een looptijd in seconden (cd_time). Het
+    apparaat valt na de looptijd terug op zijn eigen modus — de dodemansknop.
+    Wattson stuurt daarom elk commando (ook rust = 0 W) met MS_PASSIVE_TTL_S en
+    herhaalt het na MS_PASSIVE_REFRESH_S via `needs_refresh()`; valt Wattson
+    weg dan is de accu binnen de TTL weer autonoom.
+    """
+
+    name = "marstek_local"
+    caps = AdapterCaps(p1_matching=False, device_limits=False, surplus_mode=False,
+                       control_latency_s=5.0, min_setpoint_w=50.0)
+
+    TTL_S = 900
+    REFRESH_S = 300
+    SERVICE = "set_passive_mode"
+    DOMAINS = ("marstek_local_api", "marstek")
+
+    def __init__(self, coordinator):
+        super().__init__(coordinator)
+        self._sent_at: float | None = None
+        self._last_signed: float | None = None
+
+    def _domain(self) -> str:
+        configured = getattr(self.c, "ms_service", "") or "auto"
+        if configured != "auto":
+            return configured
+        has = getattr(self.c.hass.services, "has_service", None)
+        if callable(has):
+            for domain in self.DOMAINS:
+                if has(domain, self.SERVICE):
+                    return domain
+        return self.DOMAINS[0]
+
+    async def _send(self, signed_w: float) -> None:
+        c = self.c
+        device_id = getattr(c, "ms_device_id", "")
+        if not device_id:
+            raise RuntimeError("marstek_local: geen device_id geconfigureerd")
+        await c.hass.services.async_call(
+            self._domain(), self.SERVICE,
+            {"device_id": device_id, "power": int(round(signed_w)),
+             "duration": self.TTL_S},
+            blocking=True)
+        self._sent_at = time.monotonic()
+        self._last_signed = signed_w
+
+    def needs_refresh(self) -> bool:
+        return (self._sent_at is not None
+                and time.monotonic() - self._sent_at >= self.REFRESH_S)
+
+    async def apply(self, action, power_w, *, p1_cap=True):
+        c = self.c
+        if action == "ontladen" and p1_cap:
+            power_w = self._p1_capped(power_w)
+        if action in ("ontladen", "verkopen"):
+            power_w = min(power_w, c.params.p_discharge_max_w)
+            signed = power_w
+        elif action == "laden":
+            power_w = min(power_w, c.params.p_charge_max_w)
+            signed = -power_w
+        else:
+            power_w = 0.0
+            signed = 0.0
+        # onder het minimum stuurt het apparaat toch niets zinvols; dan liever
+        # expliciet 0 W dan een setpoint dat de firmware zelf wegrondt
+        if 0.0 < abs(signed) < self.caps.min_setpoint_w:
+            signed = 0.0
+            power_w = 0.0
+        await self._send(signed)
+        c.last_applied = f"{action} ({signed:+.0f} W, marstek local api, {self.TTL_S}s)"
+        return power_w
+
+
 class GenericAdapter(BatteryAdapter):
     """Elk merk met number-bediening: één signed vermogen-number, of losse
     laad-/ontlaad-numbers. Ontladen wordt begrensd op de actuele netto-import
@@ -495,6 +598,7 @@ class GenericAdapter(BatteryAdapter):
 _ADAPTERS = {
     "zendure": ZendureAdapter,
     "marstek": MarstekAdapter,
+    "marstek_local": MarstekLocalAdapter,
     "generic": GenericAdapter,
 }
 

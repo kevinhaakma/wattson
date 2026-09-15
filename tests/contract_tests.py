@@ -39,8 +39,12 @@ class FakeState:
 
 
 class FakeServices:
-    def __init__(self):
+    def __init__(self, available=()):
         self.calls = []
+        self.available = set(available)
+
+    def has_service(self, domain, service):
+        return (domain, service) in self.available
 
     async def async_call(self, domain, service, data, blocking=False):
         self.calls.append((domain, service, data))
@@ -68,6 +72,7 @@ class FakeCoordinator:
             ent_zd_outlim="", ent_zd_acmode="", ent_zd_chg="", ent_zd_dis="",
             ent_ms_mode="", ent_ms_charge="", ent_ms_discharge="", ent_gen_power="",
             ent_gen_charge="", ent_gen_discharge="", ent_bat_chg="", ent_bat_dis="",
+            ent_ms_rs485="", ms_device_id="", ms_service="auto",
         )
         defaults.update(entities)
         for key, value in defaults.items():
@@ -389,6 +394,98 @@ def test_marstek():
     run(ad.apply("rust", 0.0))
     check("marstek: rust -> mode 0", last_value(hass, "number.ms_mode") == 0)
 
+    # RS485-control-mode (register 42000) uit -> eerst aanzetten, dan sturen
+    hass = FakeHass({
+        "number.ms_mode": FakeState("0", {"min": 0, "max": 2}),
+        "number.ms_dis": FakeState("0", {"min": 0, "max": 2500, "unit_of_measurement": "W"}),
+        "switch.ms_rs485": FakeState("off"),
+        "sensor.p1": FakeState("500", {"unit_of_measurement": "W"}),
+    })
+    c = FakeCoordinator(hass, ent_ms_mode="number.ms_mode", ent_ms_discharge="number.ms_dis",
+                        ent_ms_rs485="switch.ms_rs485", ent_p1="sensor.p1")
+    ad = A.create_adapter("marstek", c)
+    run(ad.apply("ontladen", 400.0))
+    names = [(d, s) for d, s, _ in hass.services.calls]
+    check("marstek: RS485-control uit -> switch.turn_on vóór de force-writes",
+          names and names[0] == ("switch", "turn_on")
+          and ("number", "set_value") in names[1:])
+    hass.services.calls.clear()
+    run(ad.apply("rust", 0.0))
+    check("marstek: rust raakt de RS485-switch niet aan",
+          all(d != "switch" for d, _, _ in hass.services.calls))
+
+
+def test_marstek_local():
+    def make(available=(("marstek_local_api", "set_passive_mode"),), service="auto", p1="300"):
+        hass = FakeHass({"sensor.p1": FakeState(p1, {"unit_of_measurement": "W"})})
+        hass.services = FakeServices(available)
+        c = FakeCoordinator(hass, ms_device_id="dev123", ms_service=service, ent_p1="sensor.p1")
+        return hass, c, A.create_adapter("marstek_local", c)
+
+    def passive_calls(hass):
+        return [(d, data) for d, s, data in hass.services.calls if s == "set_passive_mode"]
+
+    # ontladen: + = ontladen, P1-cap 800 -> 300, TTL meegestuurd
+    hass, c, ad = make()
+    applied = run(ad.apply("ontladen", 800.0))
+    calls = passive_calls(hass)
+    check("marstek_local: ontladen -> set_passive_mode +300 W met TTL",
+          applied == 300.0 and calls and calls[-1][0] == "marstek_local_api"
+          and calls[-1][1] == {"device_id": "dev123", "power": 300, "duration": ad.TTL_S})
+
+    # laden: negatief vermogen, begrensd op p_charge_max (1600)
+    hass, c, ad = make()
+    applied = run(ad.apply("laden", 2500.0))
+    check("marstek_local: laden -> negatief, geclampt op p_charge_max",
+          applied == 1600.0 and passive_calls(hass)[-1][1]["power"] == -1600)
+
+    # verkopen: geen P1-cap, wel p_discharge_max (800)
+    hass, c, ad = make(p1="0")
+    applied = run(ad.apply("verkopen", 1200.0))
+    check("marstek_local: verkopen zonder P1-cap, max 800",
+          applied == 800.0 and passive_calls(hass)[-1][1]["power"] == 800)
+
+    # rust: expliciet 0 W passive (accu blijft stil zolang Wattson ververst)
+    hass, c, ad = make()
+    applied = run(ad.apply("rust", 0.0))
+    check("marstek_local: rust -> passive 0 W",
+          applied == 0.0 and passive_calls(hass)[-1][1]["power"] == 0)
+
+    # onder het minimum-setpoint -> 0 W in plaats van een onzinnig klein setpoint
+    hass, c, ad = make(p1="20")
+    applied = run(ad.apply("ontladen", 800.0))
+    check("marstek_local: onder min_setpoint -> 0 W",
+          applied == 0.0 and passive_calls(hass)[-1][1]["power"] == 0)
+
+    # domein-detectie: taurgis-integratie ('marstek') en expliciete keuze
+    hass, c, ad = make(available=(("marstek", "set_passive_mode"),))
+    run(ad.apply("rust", 0.0))
+    check("marstek_local: domein auto-gedetecteerd (marstek)",
+          passive_calls(hass)[-1][0] == "marstek")
+    hass, c, ad = make(available=(), service="marstek")
+    run(ad.apply("rust", 0.0))
+    check("marstek_local: expliciet domein wint", passive_calls(hass)[-1][0] == "marstek")
+
+    # dodemansknop: pas na REFRESH_S opnieuw sturen
+    hass, c, ad = make()
+    check("marstek_local: geen refresh vóór eerste commando", not ad.needs_refresh())
+    run(ad.apply("ontladen", 100.0))
+    check("marstek_local: vers commando hoeft geen refresh", not ad.needs_refresh())
+    ad._sent_at -= ad.REFRESH_S + 1
+    check("marstek_local: na REFRESH_S wél refresh", ad.needs_refresh())
+    check("marstek_local: TTL ruim boven refresh-interval (marge voor gemiste tick)",
+          ad.TTL_S >= 2 * ad.REFRESH_S)
+
+    # geen device_id -> harde fout, geen stille no-op
+    hass = FakeHass({}); hass.services = FakeServices()
+    c = FakeCoordinator(hass, ms_device_id="")
+    ad = A.create_adapter("marstek_local", c)
+    try:
+        run(ad.apply("laden", 100.0)); failed = False
+    except RuntimeError:
+        failed = True
+    check("marstek_local: zonder device_id een RuntimeError", failed)
+
 
 def test_generic():
     def make(**kw):
@@ -481,7 +578,11 @@ def test_telemetry_and_caps():
 
     z = A.create_adapter("zendure", FakeCoordinator(FakeHass({})))
     m = A.create_adapter("marstek", FakeCoordinator(FakeHass({})))
+    ml = A.create_adapter("marstek_local", FakeCoordinator(FakeHass({})))
     g = A.create_adapter("generic", FakeCoordinator(FakeHass({})))
+    check("caps: marstek_local = vast setpoint zonder device-limieten of surplus",
+          not (ml.caps.p1_matching or ml.caps.device_limits or ml.caps.surplus_mode)
+          and not m.needs_refresh() and not g.needs_refresh())
     check("caps: zendure gebruikt eigen volglussen en device-limieten",
           not z.caps.p1_matching and z.caps.device_limits and not z.caps.surplus_mode
           and not (m.caps.p1_matching or m.caps.device_limits or m.caps.surplus_mode)
@@ -493,6 +594,7 @@ def test_telemetry_and_caps():
 def main():
     test_zendure()
     test_marstek()
+    test_marstek_local()
     test_generic()
     test_telemetry_and_caps()
     fails = [r for r in RESULTS if not r["ok"]]

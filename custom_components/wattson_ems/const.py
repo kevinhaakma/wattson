@@ -45,8 +45,9 @@ CONF_ENT_ZD_ACMODE = "ent_zd_acmode"
 CONF_ADAPTER = "adapter"
 ADAPTER_ZENDURE = "zendure"
 ADAPTER_GENERIC = "generic"
-ADAPTER_MARSTEK = "marstek"
-ADAPTERS = [ADAPTER_ZENDURE, ADAPTER_MARSTEK, ADAPTER_GENERIC]
+ADAPTER_MARSTEK = "marstek"              # RS485/Modbus: force-mode + forcible powers
+ADAPTER_MARSTEK_LOCAL = "marstek_local"  # Marstek Local API (UDP): passive-mode-service
+ADAPTERS = [ADAPTER_ZENDURE, ADAPTER_MARSTEK, ADAPTER_MARSTEK_LOCAL, ADAPTER_GENERIC]
 
 # generieke adapter: number-entiteiten waarmee elk accumerk aanstuurbaar is
 CONF_ENT_GEN_POWER = "ent_gen_power"          # één signed number: +W laden / -W ontladen
@@ -58,6 +59,24 @@ CONF_ENT_GEN_DISCHARGE = "ent_gen_discharge"
 CONF_ENT_MS_MODE = "ent_ms_mode"
 CONF_ENT_MS_CHARGE = "ent_ms_charge"
 CONF_ENT_MS_DISCHARGE = "ent_ms_discharge"
+# optioneel: de RS485-control-mode-switch (register 42000). Zonder actieve
+# RS485-control negeert de Venus alle force-registers; de adapter zet de
+# switch aan vóór het eerste commando als hij uit staat.
+CONF_ENT_MS_RS485 = "ent_ms_rs485"
+
+# marstek local api (UDP, HACS-integraties jaapp/ha-marstek-local-api,
+# Flodesirat-fork, taurgis/has-marstek-local-api): sturing via de service
+# `<domein>.set_passive_mode` met een device_id, een signed vermogen
+# (+ = ontladen, - = laden) en een looptijd (cd_time). Na afloop van de
+# looptijd valt de accu terug op zijn eigen modus — dat is de dodemansknop:
+# Wattson ververst het commando periodiek, en valt Wattson weg dan neemt de
+# accu binnen MS_PASSIVE_TTL_S zelf het roer weer over.
+CONF_MS_DEVICE_ID = "ms_device_id"
+CONF_MS_SERVICE = "ms_service"          # "auto" of het integratiedomein
+MS_SERVICE_AUTO = "auto"
+MS_SERVICE_DOMAINS = ["marstek_local_api", "marstek"]
+MS_PASSIVE_TTL_S = 900       # looptijd van elk passive-commando
+MS_PASSIVE_REFRESH_S = 300   # ouder dan dit -> opnieuw sturen (bewakingslus 60 s)
 
 # telemetrie voor marstek/generic (optioneel): gemeten laad-/ontlaadvermogen
 # van de accu zelf. Zonder deze sensoren kan de watchdog op die adapters geen
@@ -139,6 +158,9 @@ DEFAULT_OPTIONS = {
     CONF_ENT_MS_MODE: "",
     CONF_ENT_MS_CHARGE: "",
     CONF_ENT_MS_DISCHARGE: "",
+    CONF_ENT_MS_RS485: "",
+    CONF_MS_DEVICE_ID: "",
+    CONF_MS_SERVICE: MS_SERVICE_AUTO,
     CONF_ENT_BAT_CHG: "",
     CONF_ENT_BAT_DIS: "",
     CONF_CAPACITY: _BAT_CAPACITY,
