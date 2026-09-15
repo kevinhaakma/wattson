@@ -21,7 +21,10 @@
           "ent_wallbox_2_thuis": "EV 2 at-home gate (optional; charging elsewhere is ignored)",
           "ent_pv_now": "Current PV power (optional)",
           "ent_pv_remain": "PV energy remaining today (optional)",
-          "ent_pv_tomorrow": "PV energy tomorrow (optional)"
+          "ent_pv_tomorrow": "PV energy tomorrow (optional)",
+          "ent_pv_uur_nu": "PV-forecast dit uur (kWh, optioneel)",
+          "ent_pv_uur_volgend": "PV-forecast volgend uur (kWh, optioneel)",
+          "ent_kalibratie": "Geplande accu-kalibratie (datetime, optioneel)"
         }
       },
       "adapter": {
@@ -34,6 +37,7 @@
           "ent_zd_outlim": "Zendure discharge limit",
           "ent_zd_acmode": "Zendure AC mode select (input/output, strongly recommended)",
           "ent_zd_hems": "Zendure HEMS / AI status (optional)",
+          "ent_zd_socset": "Zendure SoC ceiling (socSet number, optional)",
           "ent_zd_chg": "Zendure measured charge power (optional)",
           "ent_zd_dis": "Zendure measured discharge power (optional)",
           "ent_ms_mode": "Marstek force mode",
@@ -52,6 +56,7 @@
         "data": {
           "capacity_kwh": "Usable capacity (kWh)",
           "min_soc_pct": "Minimum state of charge (%)",
+          "max_soc_pct": "Maximum state of charge (%)",
           "p_charge_max_w": "Maximum charge power (W)",
           "p_discharge_max_w": "Maximum discharge power (W)",
           "wedge_post_saldering": "Export price discount after net-metering ends (EUR/kWh, from 2027)",
@@ -92,6 +97,7 @@
           "ent_zd_outlim": "Battery output (discharge) limit number entity",
           "ent_zd_acmode": "Battery AC mode select (input/output, strongly recommended)",
           "ent_zd_hems": "Battery HEMS / AI-mode status (binary_sensor)",
+          "ent_zd_socset": "Zendure SoC ceiling (socSet number, optional)",
           "ent_zd_chg": "Battery charge power sensor (optional)",
           "ent_zd_dis": "Battery discharge power sensor (optional)",
           "ent_bat_chg": "Battery charge power sensor (optional, enables watchdog)",
@@ -102,6 +108,7 @@
           "ent_gen_discharge": "Generic: discharge power number (W)",
           "capacity_kwh": "Battery capacity (kWh)",
           "min_soc_pct": "Minimum SoC (%)",
+          "max_soc_pct": "Maximum SoC (%)",
           "p_charge_max_w": "Max charge power (W)",
           "p_discharge_max_w": "Max discharge power (W)",
           "ent_ms_mode": "Marstek: force mode entity (select or number, 0=stop/1=charge/2=discharge)",
@@ -109,7 +116,10 @@
           "ent_ms_discharge": "Marstek: forcible discharge power number (W)",
           "wedge_post_saldering": "Export price discount after net-metering ends (EUR/kWh, from 2027)",
           "ent_import_totalen": "Grid import total counters (yearly netting guard, optional)",
-          "ent_export_totalen": "Grid export total counters (yearly netting guard, optional)"
+          "ent_export_totalen": "Grid export total counters (yearly netting guard, optional)",
+          "ent_pv_uur_nu": "PV-forecast dit uur (kWh, optioneel)",
+          "ent_pv_uur_volgend": "PV-forecast volgend uur (kWh, optioneel)",
+          "ent_kalibratie": "Geplande accu-kalibratie (datetime, optioneel)"
         }
       }
     },

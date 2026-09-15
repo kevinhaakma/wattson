@@ -138,18 +138,6 @@ def export_recovery_state(source_p1_w: float, *, threshold_w: float,
     return since, now_s - since >= hold_s
 
 
-def export_quiet(now_s: float, last_export_s: float | None,
-                 quiet_s: float) -> bool:
-    """Of de bron lang genoeg export-stil is om piek-ontladen te starten.
-
-    Bij wisselend zonweer pendelt de bronflow rond nul: een importpiek is dan
-    geen bewijs dat het overschot weg is, en een gestart ontladen wordt binnen
-    een minuut weer door de exportbewaking afgebroken. Pas als er een heel
-    rustvenster geen bronexport is gezien, is de piek het relais waard.
-    """
-    return last_export_s is None or now_s - last_export_s >= quiet_s
-
-
 async def set_number(hass, entity: str, value, *, force: bool = False) -> None:
     """Zet een number-entity, geclampt op haar eigen min/max.
 
@@ -270,6 +258,14 @@ class BatteryAdapter:
 
     # gedeelde begrenzing: ontladen nooit boven de actuele netto-import
     def _p1_capped(self, power_w: float) -> float:
+        # Nooit op één sample begrenzen: de mediaan van de accu-gecorrigeerde
+        # netflow (SourcePower) is leidend. 06-09 02:02: eerste plantick na
+        # herstart zag P1 = 10 W (de accu leverde nog) en capte 279 -> 10 W;
+        # de ontlaadregelaar had een minuut nodig om dat te herstellen.
+        source = getattr(self.c, "source", None)
+        typ = source.typical() if source is not None else None
+        if typ is not None:
+            return min(power_w, max(typ, 0.0))
         p1 = read_power_w(self.c.hass, self.c.ent_p1)
         if p1 is None:
             return 0.0
@@ -305,17 +301,12 @@ class ZendureAdapter(BatteryAdapter):
         return power_w
 
     name = "zendure"
-    caps = AdapterCaps(p1_matching=False, device_limits=True, surplus_mode=True,
+    # surplus_mode=False sinds 06-09: de eigen overschotmatcher (smart_charging)
+    # slingert (state 1<->0 elke ~60 s, 9 relaiskliks/40 min); Wattsons
+    # ChargeController volgt het overschot in manual-modus, net als ontladen.
+    caps = AdapterCaps(p1_matching=False, device_limits=True, surplus_mode=False,
                        control_latency_s=5.0, min_setpoint_w=50.0,
                        feedback_ack=True)
-
-    def __init__(self, coordinator):
-        super().__init__(coordinator)
-        # Een herstart of noodstop kan de fysieke richting op 0 achterlaten
-        # terwijl de manager-select zijn oude mode herstelt. De eerste echte
-        # actie per richting moet daarom één keer opnieuw naar de manager,
-        # ook als select/manual_power in HA al dezelfde waarde toont.
-        self._needs_reapply = {"laden", "ontladen"}
 
     def telemetry_entities(self):
         return (self.c.ent_zd_chg, self.c.ent_zd_dis)
@@ -361,10 +352,8 @@ class ZendureAdapter(BatteryAdapter):
         # limiet van de foute richting dicht (of allebei bij onbekend);
         # apparaat-commando: komt ook aan als de select al 'off' toont
         if richting in (None, "laden"):
-            self._needs_reapply.add("laden")
             await set_power_number(self.c.hass, self.c.ent_zd_inlim, 0)
         if richting in (None, "ontladen"):
-            self._needs_reapply.add("ontladen")
             await set_power_number(self.c.hass, self.c.ent_zd_outlim, 0)
 
     async def enforce_rest(self):
@@ -384,17 +373,11 @@ class ZendureAdapter(BatteryAdapter):
         # ac_mode op 'input' staat en ontlaadt alleen op 'output'; de
         # Zendure-manager zet dit niet betrouwbaar zelf.
         # Bij 'off' blijft de stand staan — geen richtingswissel nodig.
-        richting = None
-        if mode in ("smart_charging", "store_solar") or (mode == "manual" and manual_w < 0):
-            richting = "laden"
-        elif mode in ("smart_discharging", "smart") or (mode == "manual" and manual_w > 0):
-            richting = "ontladen"
-        force_reapply = richting in self._needs_reapply
         if c.ent_zd_acmode:
             gewenst = None
-            if richting == "laden":
+            if mode in ("smart_charging", "store_solar") or (mode == "manual" and manual_w < 0):
                 gewenst = "input"
-            elif richting == "ontladen":
+            elif mode in ("smart_discharging", "smart") or (mode == "manual" and manual_w > 0):
                 gewenst = "output"
             if gewenst is not None:
                 cur_ac = c.hass.states.get(c.ent_zd_acmode)
@@ -414,14 +397,11 @@ class ZendureAdapter(BatteryAdapter):
             # fysieke richting dicht. Bij terugkeer naar manual moet dezelfde
             # waarde daarom opnieuw door de Zendure-manager verwerkt worden.
             await set_power_number(
-                c.hass, c.ent_zd_manual, manual_w,
-                force=mode_changed or force_reapply)
-        if mode_changed or force_reapply:
+                c.hass, c.ent_zd_manual, manual_w, force=mode_changed)
+        if mode_changed:
             await c.hass.services.async_call(
                 "select", "select_option",
                 {"entity_id": c.ent_zd_operation, "option": mode}, blocking=True)
-        if richting is not None:
-            self._needs_reapply.discard(richting)
         c.last_applied = f"{mode} ({manual_w:+.0f} W)" if mode == "manual" else mode
 
 

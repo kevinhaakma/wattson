@@ -1,4 +1,4 @@
-"""Sensoren: Wattson-advies (+plan) en verwachte besparing."""
+"""Sensoren: Wattson-advies (+plan), verwachte besparing en gerealiseerde waarde."""
 from __future__ import annotations
 
 from homeassistant.components.sensor import SensorEntity
@@ -14,7 +14,11 @@ async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
     coordinator = hass.data[DOMAIN][entry.entry_id]
-    async_add_entities([WattsonAdviesSensor(coordinator), WattsonBesparingSensor(coordinator)])
+    async_add_entities([
+        WattsonAdviesSensor(coordinator),
+        WattsonBesparingSensor(coordinator),
+        WattsonGerealiseerdSensor(coordinator),
+    ])
 
 
 class WattsonAdviesSensor(SensorEntity):
@@ -38,6 +42,7 @@ class WattsonAdviesSensor(SensorEntity):
         return {
             "setpoint_w": c.setpoint_w,
             "plan": c.plan_hours,
+            "plan_kwartier": c.plan_slots[:16],
             "berekend_met": c.inputs,
             "reden": c.reden,
             "volgende_actie": c.volgende_actie,
@@ -81,3 +86,43 @@ class WattsonBesparingSensor(SensorEntity):
     @property
     def native_value(self):
         return self.coordinator.expected_saving
+
+
+class WattsonGerealiseerdSensor(SensorEntity):
+    """Gerealiseerde accu-waarde vandaag: opbrengst van ontladen minus kosten
+    van laden, geïntegreerd op de gemeten vermogens x de actuele uurprijs.
+    Dit is de kasstroom-kant van het verhaal: het planvoordeel-sensor zegt wat
+    Wattson vandaag dénkt te winnen, deze sensor wat er echt geboekt is."""
+
+    _attr_name = "Wattson gerealiseerd"
+    _attr_unique_id = "wattson_gerealiseerd"
+    _attr_icon = "mdi:cash-check"
+    _attr_native_unit_of_measurement = "EUR"
+    _attr_should_poll = False
+    _attr_suggested_display_precision = 2
+
+    def __init__(self, coordinator):
+        self.coordinator = coordinator
+        self._attr_device_info = wattson_device_info(coordinator)
+        coordinator.realized_sensor = self
+
+    @property
+    def native_value(self):
+        r = self.coordinator.realized
+        return round(r["opbrengst"] - r["kosten"], 2)
+
+    @property
+    def extra_state_attributes(self):
+        r = self.coordinator.realized
+        dagen = r.get("dagen", [])
+        week = [d for d in dagen[:7]]
+        return {
+            "vandaag_kosten": round(r["kosten"], 2),
+            "vandaag_opbrengst": round(r["opbrengst"], 2),
+            "vandaag_laad_kwh": round(r["laad_kwh"], 2),
+            "vandaag_ontlaad_kwh": round(r["ontlaad_kwh"], 2),
+            "gisteren": dagen[0] if dagen else None,
+            "week_netto": round(sum(d["netto"] for d in week), 2) if week else None,
+            "dagen": dagen,
+            "verwacht_vandaag": self.coordinator.expected_saving,
+        }

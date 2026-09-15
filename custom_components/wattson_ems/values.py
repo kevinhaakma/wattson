@@ -41,7 +41,7 @@ class PlanValues:
         self.lam = lam
         self.terminal_value = terminal_value
         self.end_soc_kwh = P.plan_end_soc(steps, setpoints, soc_kwh, p)
-        self.expected_load_kwh = sum(s.load_w for s in steps) / 1000.0
+        self.expected_load_kwh = sum(s.load_w * s.dt_h for s in steps) / 1000.0
 
         # verwachte zelfvoorziening over de horizon: welk deel van de eigen
         # vraag komt volgens dit plan NIET van het net (PV + accu samen)
@@ -49,7 +49,7 @@ class PlanValues:
         imp = 0.0
         for st, a in zip(steps, setpoints):
             _, soc, act, _ = P.hour_result(st, a, soc, p)
-            imp += max(st.load_w - st.pv_w + act, 0.0) / 1000.0
+            imp += max(st.load_w - st.pv_w + act, 0.0) * st.dt_h / 1000.0
         self.expected_import_kwh = imp
         load = max(self.expected_load_kwh, 1e-9)
         self.zelfvoorziening_pct = max(0.0, min(1.0, 1.0 - imp / load)) * 100.0

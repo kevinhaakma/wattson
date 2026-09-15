@@ -185,6 +185,8 @@
   "p_discharge_max_w": 1400.0,
   "eta_nom": 0.955,
   "p_fix_w": 0.0,
-  "standby_w": 6.0
+  "standby_w": 6.0,
+  "soc_knee_kwh": 1.73,
+  "p_discharge_low_w": 700.0
  }
 }

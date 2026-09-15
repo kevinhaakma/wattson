@@ -6,7 +6,7 @@ Schrijven gebeurt via adapters.py (set_number e.d.) — bewust gescheiden.
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from homeassistant.core import HomeAssistant
 from homeassistant.util import dt as dt_util
@@ -39,6 +39,21 @@ class Telemetry:
     def fresh_power_w(self, entity: str, max_age_s: float = WATCH_FRESH_S) -> float | None:
         return A.read_fresh_power_w(self.hass, entity, max_age_s, dt_util.utcnow())
 
+    def live_power_w(self, entity: str, max_age_s: float = WATCH_FRESH_S) -> float | None:
+        """Vermogen als de bron LEEFT: last_reported (elke schrijfactie) in
+        plaats van last_updated (alleen bij waardeverandering). Voor
+        write-on-change-telemetrie zoals de Zendure-sensoren is een lang
+        constante waarde (bv. 0 W) via fresh_power_w onterecht 'oud'."""
+        if not entity:
+            return None
+        st = self.hass.states.get(entity)
+        if st is None or st.state in ("unknown", "unavailable"):
+            return None
+        reported = getattr(st, "last_reported", None) or st.last_updated
+        if (dt_util.utcnow() - reported).total_seconds() > max_age_s:
+            return None
+        return A.read_power_w(self.hass, entity)
+
     def energy_kwh(self, entity: str) -> float | None:
         """Lees een energie-forecast als kWh; accepteert Wh, kWh en MWh."""
         value = self.f(entity)
@@ -67,27 +82,31 @@ class Telemetry:
         return None if value is None else self.price_eur_kwh(value, self.unit(self.ent_price))
 
     def price_forecast(self) -> list[tuple[datetime, float]]:
-        """Uur-forecast uit het forecast-attribuut van de prijs-sensor.
+        """Prijs-forecast per slot (uur of kwartier) uit het forecast-attribuut.
 
         Ondersteunde contracten per forecast-item:
-        - Zonneplan: {"datetime": iso, "electricity_price": prijs x 1e7}
-        - generiek:  {"datetime"|"start"|"from": iso, "price"|"value": €/kWh}
-        Begint de forecast pas bij het volgende uur, dan wordt het huidige uur
-        aangevuld met de actuele sensorwaarde — anders zou het setpoint van
-        het volgende uur nu al uitgevoerd worden.
+        - Zonneplan uur:      {"datetime": iso, "electricity_price": prijs x 1e7}
+        - Zonneplan kwartier: {"start_date": iso, "price_tax_included": {"amount": prijs x 1e7}}
+        - generiek:           {"datetime"|"start"|"from": iso, "price"|"value": €/kWh}
+        De slotlengte volgt uit de afstand tussen de items. De lopende slot telt
+        mee; ontbreekt die, dan vult de actuele sensorwaarde hem aan — anders
+        zou het setpoint van de volgende slot nu al uitgevoerd worden.
         """
         st = self.hass.states.get(self.ent_price)
         if st is None:
             return []
-        now = dt_util.utcnow().replace(minute=0, second=0, microsecond=0)
-        out = []
+        items = []
         for item in st.attributes.get("forecast", []) or []:
             if not isinstance(item, dict):
                 continue
             try:
-                t = item.get("datetime") or item.get("start") or item.get("from")
+                t = (item.get("datetime") or item.get("start_date")
+                     or item.get("start") or item.get("from"))
                 dt = datetime.fromisoformat(str(t).replace("Z", "+00:00"))
-                if item.get("electricity_price") is not None:
+                incl = item.get("price_tax_included")
+                if isinstance(incl, dict) and incl.get("amount") is not None:
+                    price = float(incl["amount"]) / 1e7  # zonneplan-schaal
+                elif item.get("electricity_price") is not None:
                     price = float(item["electricity_price"]) / 1e7  # zonneplan-schaal
                 else:
                     raw = item.get("price", item.get("value"))
@@ -98,14 +117,19 @@ class Telemetry:
                 continue
             if dt.tzinfo is None:
                 dt = dt.replace(tzinfo=timezone.utc)
-            if dt >= now:
-                out.append((dt, price))
-        out.sort(key=lambda x: x[0])
+            items.append((dt, price))
+        items.sort(key=lambda x: x[0])
+        diffs = [b[0] - a[0] for a, b in zip(items, items[1:]) if b[0] > a[0]]
+        slot = min(diffs) if diffs else timedelta(hours=1)
+        now = dt_util.utcnow()
+        out = [(dt, price) for dt, price in items if dt + slot > now]
         cur = self.current_price()
+        s = slot.total_seconds()
+        start = datetime.fromtimestamp(now.timestamp() // s * s, tz=timezone.utc)
         if not out:
             if cur is not None:
-                out = [(now, cur)]
+                out = [(start, cur)]
         elif out[0][0] > now and cur is not None:
-            # forecast begint pas volgend uur: huidig uur expliciet toevoegen
-            out.insert(0, (now, cur))
+            # forecast begint pas bij de volgende slot: lopende slot toevoegen
+            out.insert(0, (start, cur))
         return out

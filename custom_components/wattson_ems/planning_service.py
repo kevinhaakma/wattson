@@ -69,6 +69,14 @@ def evaluate(
     return PlanEvaluation(setpoints, cost, lam, round(base - planned, 2))
 
 
+def slot_hours(prices: list[tuple[datetime, float]]) -> list[float]:
+    """Lengte (uur) per prijsslot: afstand tot de volgende; de laatste erft die van de voorlaatste."""
+    times = [when for when, _ in prices]
+    out = [(b - a).total_seconds() / 3600.0 for a, b in zip(times, times[1:])]
+    out.append(out[-1] if out else 1.0)
+    return out
+
+
 def plan_hours(
     prices: list[tuple[datetime, float]],
     steps: list[P.Step],
@@ -78,18 +86,57 @@ def plan_hours(
     format_time: Callable[[datetime], str],
     limit: int = 16,
 ) -> list[dict]:
-    """Maak de compacte, vooruit gesimuleerde planning voor de HA-sensor."""
+    """Compacte, vooruit gesimuleerde planning per klokuur voor de HA-sensor.
+
+    Kwartierstappen worden per uur samengevoegd (tijdgewogen gemiddelden,
+    SoC aan het eind van het uur), zodat de uur-kaarten ongewijzigd werken.
+    """
+    buckets = []
+    soc = soc_kwh
+    for (when, price), action, step in zip(prices, setpoints, steps):
+        _, soc, _, _ = P.hour_result(step, action, soc, params)
+        hour = when.replace(minute=0, second=0, microsecond=0)
+        if not buckets or buckets[-1]["hour"] != hour:
+            if len(buckets) >= limit:
+                break
+            buckets.append({"hour": hour, "dt": 0.0, "prijs": 0.0, "sp": 0.0,
+                            "last": 0.0, "pv": 0.0})
+        b = buckets[-1]
+        d = step.dt_h
+        b["dt"] += d
+        b["prijs"] += price * d
+        b["sp"] += action * d
+        b["last"] += step.load_w * d
+        b["pv"] += step.pv_w * d
+        b["soc"] = soc
+    return [{
+        "tijd": format_time(b["hour"]),
+        "prijs": round(b["prijs"] / b["dt"], 3),
+        "setpoint_w": round(b["sp"] / b["dt"]),
+        "soc_na_kwh": round(b["soc"], 2),
+        "verwachte_last_w": round(b["last"] / b["dt"]),
+        "verwachte_pv_w": round(b["pv"] / b["dt"]),
+    } for b in buckets]
+
+
+def plan_slots(
+    prices: list[tuple[datetime, float]],
+    steps: list[P.Step],
+    setpoints: list[float],
+    soc_kwh: float,
+    params: P.Params,
+    format_time: Callable[[datetime], str],
+) -> list[dict]:
+    """Planning per stap (kwartier bij kwartierprijzen), over de hele horizon."""
     result = []
     soc = soc_kwh
-    for (when, price), action, step in list(zip(prices, setpoints, steps))[:limit]:
+    for (when, price), action, step in zip(prices, setpoints, steps):
         _, soc, _, _ = P.hour_result(step, action, soc, params)
         result.append({
             "tijd": format_time(when),
             "prijs": round(price, 3),
             "setpoint_w": round(action),
             "soc_na_kwh": round(soc, 2),
-            "verwachte_last_w": round(step.load_w),
-            "verwachte_pv_w": round(step.pv_w),
         })
     return result
 
@@ -103,11 +150,12 @@ def decision_from_plan(
 ) -> Decision:
     """Vertaal het eerste DP-setpoint naar de semantische stuurtoestand."""
     setpoint_w = round(setpoint_w)
+    slot = "kwartier" if first_step.dt_h < 1.0 else "uur"
     if setpoint_w > 50:
         return Decision(
             AdviceMode.CHARGE,
             setpoint_w,
-            f"goedkoop uur (€{first_step.price_imp:.3f})",
+            f"goedkoop {slot} (€{first_step.price_imp:.3f})",
         )
     if setpoint_w < -50:
         net_home = max(first_step.load_w - first_step.pv_w, 0.0)
@@ -121,7 +169,7 @@ def decision_from_plan(
         return Decision(
             AdviceMode.DISCHARGE,
             setpoint_w,
-            f"duur uur (€{first_step.price_imp:.3f}), "
+            f"duur {slot} (€{first_step.price_imp:.3f}), "
             f"huis vraagt {first_step.load_w:.0f} W",
         )
 

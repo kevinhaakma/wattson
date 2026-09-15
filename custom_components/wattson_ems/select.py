@@ -47,6 +47,7 @@ class WattsonAggroSelect(SelectEntity, RestoreEntity):
         self.coordinator.params.deg_cost = level["deg"]
         self.coordinator.params.risk_k = level["risk"]
         self.coordinator.aggressiveness = self._attr_current_option
+        self.coordinator.sell_top_pct = level.get("sell_top_pct", 0)
 
     async def async_select_option(self, option: str):
         self._attr_current_option = option

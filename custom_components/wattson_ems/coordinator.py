@@ -27,13 +27,16 @@ import asyncio
 import json
 import logging
 import os
+import statistics
 import time
+from collections import deque
 from collections import deque
 from dataclasses import replace
 from datetime import timedelta
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers.storage import Store
 from homeassistant.helpers.event import (
     async_call_later,
     async_track_state_change_event,
@@ -45,6 +48,7 @@ from . import adapters as A
 from . import planner as P
 from . import planning_service as PS
 from .const import (
+    DOMAIN,
     CONF_ADAPTER,
     CONF_CAPACITY,
     CONF_ENT_BAT_CHG,
@@ -57,6 +61,9 @@ from .const import (
     CONF_ENT_MS_MODE,
     CONF_ENT_P1,
     CONF_ENT_PRICE,
+    CONF_ENT_CALIBRATION,
+    CONF_ENT_PV_HOUR_NEXT,
+    CONF_ENT_PV_HOUR_NOW,
     CONF_ENT_PV_NOW,
     CONF_ENT_PV_REMAIN,
     CONF_ENT_PV_TOMORROW,
@@ -69,24 +76,27 @@ from .const import (
     CONF_ENT_ZD_DIS,
     CONF_ENT_ZD_ACMODE,
     CONF_ENT_ZD_HEMS,
+    CONF_ENT_ZD_SOCSET,
     CONF_ENT_ZD_INLIM,
     CONF_ENT_ZD_MANUAL,
     CONF_ENT_ZD_OPERATION,
     CONF_ENT_ZD_OUTLIM,
     CONF_ENT_EXPORT_TOTALS,
     CONF_ENT_IMPORT_TOTALS,
+    CAL_LEAD_H,
+    CONF_MAX_SOC_PCT,
     CONF_MIN_SOC_PCT,
     CONF_P_CHARGE,
     CONF_P_DISCHARGE,
     CONF_WEDGE_POST,
     DEFAULT_OPTIONS,
-    ASSIST_EXPORT_W,
     DWELL_OVERRIDE_EUR,
     EV_HOUSE_MIN_W,
     EV_SUSPECT_JUMP_W,
     EV_THRESHOLD_KW,
-    FILL_FULL_MARGIN_KWH,
     PLAN_MIN_DWELL_S,
+    BRIDGE_GAP_H,
+    BRIDGE_MAX_DPRICE,
     SWITCH_DEADBAND_EUR,
     TRACK_INTERVAL_S,
     UPDATE_MINUTES,
@@ -105,8 +115,10 @@ from .control import (
 )
 from .realtime import (
     AssistController,
-    DischargeGuard,
+    ChargeController,
+    DischargeController,
     ExportRecovery,
+    SourcePower,
     TrackController,
 )
 from .safety import Safety
@@ -139,6 +151,7 @@ class WattsonCoordinator:
         self.ent_zd_operation = o(CONF_ENT_ZD_OPERATION)
         self.ent_zd_manual = o(CONF_ENT_ZD_MANUAL)
         self.ent_zd_hems = o(CONF_ENT_ZD_HEMS)
+        self.ent_zd_socset = o(CONF_ENT_ZD_SOCSET)
         self.ent_zd_chg = o(CONF_ENT_ZD_CHG)
         self.ent_zd_dis = o(CONF_ENT_ZD_DIS)
         self.ent_zd_inlim = o(CONF_ENT_ZD_INLIM)
@@ -163,18 +176,32 @@ class WattsonCoordinator:
         b = cfg["battery"]
         cap = float(o(CONF_CAPACITY))
         min_soc = float(o(CONF_MIN_SOC_PCT)) / 100.0 * cap
+        self._max_soc_pct = float(o(CONF_MAX_SOC_PCT) or 100.0)
+        max_soc = self._max_soc_pct / 100.0 * cap
+        self._soc_max_cfg_kwh = max_soc
+        self.cal_window = False
         # actie-niveaus schalen mee met de ingestelde vermogens
         p_chg = float(o(CONF_P_CHARGE))
         p_dis = float(o(CONF_P_DISCHARGE))
         self.params = P.Params(
-            capacity_kwh=cap, soc_min_kwh=min_soc, soc_max_kwh=cap,
+            capacity_kwh=cap, soc_min_kwh=min_soc, soc_max_kwh=max_soc,
             p_charge_max_w=p_chg, p_discharge_max_w=p_dis,
             charge_levels=tuple(p_chg * i / 4 for i in range(5)),
             discharge_levels=tuple(p_dis * i / 4 for i in range(5)),
+            # BMS-knik: onder soc_knee_kwh levert het apparaat maar p_discharge_low_w
+            soc_knee_kwh=float(b.get("soc_knee_kwh", 0.0)),
+            p_discharge_low_w=min(float(b.get("p_discharge_low_w", p_dis)), p_dis),
             eta_nom=b["eta_nom"], p_fix_w=b["p_fix_w"],
             standby_w=b.get("standby_w", 0.0), deg_cost=cfg["deg_cost"],
             risk_k=cfg.get("risk_k", 0.0),
             risk_steps=tuple(cfg.get("risk_shape_steps", ())),
+            # 0.08 (de planner-default) maakt een uur huislast (~0,25 kWh)
+            # maar ~3 rastervakken; de afrondfout (±0,04 kWh) is dan groter
+            # dan de nachtelijke prijsverschillen en de DP verdeelt de
+            # ontlaaduren semi-willekeurig (2026-08-09: 04:00 à €0,285
+            # gekozen, 23:00/06:00 à €0,32+ overgeslagen). 0,02 kost ~30 ms
+            # per planrun en herstelt de juiste uurkeuze.
+            soc_step_kwh=cfg.get("soc_step_kwh", 0.02),
         )
         self.pv_bias = cfg["pv_bias"]
         self.trained_at = cfg["trained_at"]
@@ -187,8 +214,23 @@ class WattsonCoordinator:
         ])
         self.load_profile = LoadProfile(
             {tuple(int(x) for x in k.split("|")): v for k, v in cfg["load_profile"].items()})
+        # adaptieve laag van het profiel: geleerde slots overleven een herstart
+        self._profile_store: Store = Store(hass, 1, f"{DOMAIN}.load_profile")
+        self._load_hour = None            # lokaal klokuur dat nu bemeten wordt
+        self._load_samples: list[float] = []
+        # SoC-filter: het kale percentage jittert rond de vloer (gemeten
+        # 2026-08-13: 9->5->10% in 13 min bij stilstand) en lambda rekent erop
+        self._soc_hist: deque[float] = deque(maxlen=3)
+        # gerealiseerde waarde: wat de accu vandaag echt kost en opbrengt
+        self._realized_store: Store = Store(hass, 1, f"{DOMAIN}.realized")
+        self.realized: dict = {"datum": None, "kosten": 0.0, "opbrengst": 0.0,
+                               "laad_kwh": 0.0, "ontlaad_kwh": 0.0, "dagen": []}
+        self.realized_sensor = None
+        self.ent_calibration = o(CONF_ENT_CALIBRATION) or ""
         self.pv = PvCurve(self.t, self.ent_pv_now, self.ent_pv_remain,
-                          self.ent_pv_tomorrow, self.pv_bias)
+                          self.ent_pv_tomorrow, self.pv_bias,
+                          ent_hour_now=o(CONF_ENT_PV_HOUR_NOW) or "",
+                          ent_hour_next=o(CONF_ENT_PV_HOUR_NEXT) or "")
         self.scenario = PriceScenario(
             wedge_saldering=cfg["wedge"],
             wedge_post=float(o(CONF_WEDGE_POST)),
@@ -198,8 +240,11 @@ class WattsonCoordinator:
             list(o(CONF_ENT_EXPORT_TOTALS) or []))
         self.values = PlanValues(self.params)
         self.safety = Safety(self)
+        # bronsignaal eerst: de lagen hieronder lezen er allemaal uit
+        self.source = SourcePower(self)
         self.track = TrackController(self)
-        self.discharge_guard = DischargeGuard(self)
+        self.discharge_ctl = DischargeController(self)
+        self.charge_ctl = ChargeController(self)
         self.export_recovery = ExportRecovery(self)
         self.assist = AssistController(self)
 
@@ -207,11 +252,12 @@ class WattsonCoordinator:
         self.control_enabled = False   # master-switch (RestoreEntity zet dit terug)
         self.assist_enabled = False    # dynamisch bijspringen (aparte switch)
         self.sell_enabled = False      # verkopen boven drempelprijs (aparte switch)
-        self.fill_mode = False         # vul-modus: economie opzij, accu vol houden
+        self.sell_top_pct = 0          # 0 = gewoon sell_enabled; >0 = alleen top-N% prijzen
         self.assist_active: str | None = None
         self.aggressiveness = "gebalanceerd"
         self._decision = Decision(AdviceMode.INIT)
         self.plan_hours: list[dict] = []
+        self.plan_slots: list[dict] = []
         self.expected_saving = 0.0
         self.inputs: dict = {}
         self.plan_error: str | None = None
@@ -222,6 +268,7 @@ class WattsonCoordinator:
         self._last_action: BatteryAction | None = None
         self._last_charge_w = 0.0      # laatst werkelijk toegepast laadvermogen
         self._last_discharge_w = 0.0   # laatst werkelijk toegepast ontlaadvermogen
+        self._last_command_at = None   # tijdstip laatste fysieke commando (stale-guard)
         self._switch_debt = 0.0        # opgeteld gemist voordeel van gedempte modewissels
         self._last_mode_switch = 0.0
         self._last_load_w: float | None = None  # huisvraag vorige tick (EV-sprong-detectie)
@@ -310,6 +357,19 @@ class WattsonCoordinator:
 
     # ---------- lifecycle ----------
     async def async_start(self) -> None:
+        stored = await self._profile_store.async_load()
+        if stored:
+            self.load_profile.restore(stored.get("learned"))
+        realized = await self._realized_store.async_load()
+        if realized:
+            self.realized.update({k: realized[k] for k in self.realized
+                                  if k in realized})
+        if self.ent_soc:
+            self.listeners.append(async_track_state_change_event(
+                self.hass, [self.ent_soc], self._soc_changed))
+        # gerealiseerde-waarde-boekhouding: lichte eigen minuutlus
+        self.listeners.append(async_track_time_interval(
+            self.hass, self._realized_tick, timedelta(seconds=60)))
         self.listeners.append(async_track_time_interval(
             self.hass, self._tick, timedelta(minutes=UPDATE_MINUTES)))
         # veiligheidsbewaking los van de (tragere) plan-tick: runaway- en
@@ -330,6 +390,12 @@ class WattsonCoordinator:
             self.listeners.append(async_track_state_change_event(
                 self.hass, ev_entities, self._ev_guard))
         if self.ent_p1:
+            # Bronsignaal continu bijhouden — onafhankelijk van welke laag er
+            # toevallig actief is. Zonder deze listener zou de historie alleen
+            # vollopen tijdens assist-ticks en had de exportrem bij een
+            # plan-commando nooit genoeg samples om te kunnen blokkeren.
+            self.listeners.append(async_track_state_change_event(
+                self.hass, [self.ent_p1], self._sample_source))
             ent_chg, ent_dis = self.bat_flow_entities()
             assist_entities = list(dict.fromkeys(filter(None, (
                 self.ent_p1, self.ent_soc, ent_chg, ent_dis,
@@ -340,10 +406,12 @@ class WattsonCoordinator:
             self.listeners.append(async_track_state_change_event(
                 self.hass, [self.ent_p1], self.track.fast))
             if not self.caps.p1_matching:
-                # vast-setpoint-adapters: altijd-actieve guard verlaagt het
-                # ontlaadvermogen zodra de huisvraag zakt
+                # vast-setpoint-adapters: één trage ontlaadregelaar (omhoog én
+                # omlaag, nooit naar 0) in plaats van fast/guard/recovery
                 self.listeners.append(async_track_state_change_event(
-                    self.hass, [self.ent_p1], self.discharge_guard.check))
+                    self.hass, [self.ent_p1], self.discharge_ctl.on_p1))
+                self.listeners.append(async_track_state_change_event(
+                    self.hass, [self.ent_p1], self.charge_ctl.on_p1))
             if self.caps.surplus_mode:
                 # Sterke, bevestigde bronexport tijdens (ook al naar 0 W
                 # teruggeregeld) ontladen mag niet tot de volgende plan-/stop-
@@ -371,6 +439,10 @@ class WattsonCoordinator:
                 )
             except Exception:  # noqa: BLE001 - unload mag nooit blokkeren
                 _LOGGER.exception("Wattson: accu naar rust bij unload faalde")
+
+    @callback
+    def _sample_source(self, _event) -> None:
+        self.source.sample()
 
     @callback
     def _price_changed(self, event) -> None:
@@ -404,6 +476,7 @@ class WattsonCoordinator:
         prev = (self.advies, self.last_applied)
         try:
             await self.safety.watchdog()
+            await self._apply_soc_ceiling()
             await self._plan_and_apply()
             self.plan_error = None
         except Exception as err:  # noqa: BLE001 - watchdog: nooit crashen, wel loggen
@@ -495,62 +568,38 @@ class WattsonCoordinator:
         context = await self._build_plan_context()
         if context is None:
             self.set_decision(Decision(AdviceMode.NO_DATA))
-            if self.control_enabled and self.values.lam is None:
-                # Startupfase (restart-race 17-07): apparaat-telemetrie kan al
-                # vermogen melden voordat de prijsbron hersteld is. Vóór het
-                # eerste geldige plan is dat geen runaway maar een herstellende
-                # select/limiet — expliciet rust sturen in plaats van trippen.
-                await self.set_battery(
-                    BatteryAction.IDLE, 0.0, source=CommandSource.LIFECYCLE)
             return
 
-        evaluation = PS.evaluate(
+        # de DP kost bij kwartierstappen ~0,7 s: buiten de event loop draaien
+        evaluation = await self.hass.async_add_executor_job(
+            PS.evaluate,
             context.steps,
             context.soc_kwh,
             self.params,
             context.terminal_value,
         )
         self._update_plan_outputs(context, evaluation)
-        if self.fill_mode:
-            # Vul-modus: gebruikers-constraint boven de economie (noodvoorraad).
-            # Het DP-plan blijft rekenen voor de sensor, maar het besluit is
-            # vast: laden tot vol en de lading vasthouden. Demping en EV-guard
-            # zijn hier zinloos (het besluit wisselt niet), safety/stale-guard
-            # en de HEMS-blokkade in _apply_decision blijven gewoon gelden.
-            vol = context.soc_kwh >= self.params.soc_max_kwh - FILL_FULL_MARGIN_KWH
-            if vol:
-                self.set_decision(Decision(
-                    AdviceMode.IDLE,
-                    reason="vul-modus: accu vol — lading wordt vastgehouden",
-                ))
-            else:
-                self.set_decision(Decision(
-                    AdviceMode.CHARGE,
-                    round(self.params.p_charge_max_w),
-                    "vul-modus: laden tot vol (economie genegeerd)",
-                ))
-            await self._apply_decision(context, assist_reason)
-            return
         self.set_decision(PS.decision_from_plan(
             evaluation.setpoints[0],
             context.steps[0],
             context.wedge,
             self.values.lam_now(context.soc_kwh),
-            self.plan_hours,
+            self.plan_slots,
         ))
-        self._stabilize_decision(previous, context, evaluation)
+        await self._stabilize_decision(previous, context, evaluation)
         self._guard_suspect_ev(context)
         await self._apply_decision(context, assist_reason)
 
     async def _build_plan_context(self) -> PS.PlanningContext | None:
         """Lees één consistente snapshot en bouw de DP-stappen."""
         prices = self.t.price_forecast()
-        soc_pct = self.t.f(self.ent_soc)
+        soc_pct = self.soc_pct()
         if not prices or soc_pct is None:
             return None
         soc = soc_pct / 100.0 * self.params.capacity_kwh
         hours = [dt for dt, _ in prices]
-        pv = self.pv.curve(hours)
+        dts = PS.slot_hours(prices)
+        pv = self.pv.curve(hours, dts)
         today = dt_util.now().date()
         # jaarsaldering-positie verversen (throttled): raakt de netto-
         # importruimte op, dan schuift de wedge richting post-saldering
@@ -589,6 +638,15 @@ class WattsonCoordinator:
                     # worden teruggenomen. Native P1-matching gebruikt een
                     # variabel vermogen; daarvoor is geen commando-fallback
                     # mogelijk en blijft verse telemetrie vereist.
+                    # write-on-change: een constante meting is 'oud' voor
+                    # fresh_power_w maar wel geldig als de bron nog leeft
+                    # (06-09: eerste tick na herstart zag P1 ~0 door de nog
+                    # leverende accu, telemetrie 'oud' -> fallback 0 -> huislast
+                    # 0 -> rust tot het volgende uur)
+                    if b_chg is None:
+                        b_chg = self.t.live_power_w(ent_chg, 180)
+                    if b_dis is None:
+                        b_dis = self.t.live_power_w(ent_dis, 180)
                     if b_chg is None:
                         b_chg = self._last_charge_w if self._last_action == "laden" else 0.0
                     if b_dis is None:
@@ -596,19 +654,42 @@ class WattsonCoordinator:
                         b_dis = self._last_discharge_w if fixed_dis else 0.0
                     b_chg_now = b_chg
                     b_dis_now = b_dis
-                    load = max(A.p1_without_battery(
-                        p1, charge_w=b_chg, discharge_w=b_dis
-                    ) - wb_w + (pv.get(dt, 0.0)), 0.0)
+                    # Nooit op één P1-sample plannen: de meter levert losse
+                    # uitschieters (06-09 02:00: één sample -1117 W bij ~280 W
+                    # huislast -> huislast 0 -> rust -> relaisklik + uur
+                    # netstroom). SourcePower.typical() = mediaan van de
+                    # accu-gecorrigeerde netflow over het confirmvenster.
+                    p1_typ = self.source.typical()
+                    bron = (p1_typ if p1_typ is not None
+                            else A.p1_without_battery(
+                                p1, charge_w=b_chg, discharge_w=b_dis))
+                    load = max(bron - wb_w + (pv.get(dt, 0.0)), 0.0)
+                    # adaptief profiel: dit is een échte waarneming van de
+                    # EV/accu-gecorrigeerde huislast. Alleen leren van verse
+                    # metingen, en niet terwijl de EV-telemetrie blind is
+                    # (dan zit er autovermogen in de last).
+                    if (not ev_blind
+                            and self.t.fresh_power_w(self.ent_p1, 180)
+                            is not None):
+                        self._note_load_sample(dt_util.utcnow(), load)
             steps.append(P.Step(
                 price_imp=price,
                 price_exp=self.scenario.export_price(price, today),
                 load_w=load,
                 pv_w=pv.get(dt, 0.0),
                 ev_charging=ev_blind if k == 0 else False,
-                # verkopen is een gebruikers-constraint (switch), geen
-                # prijsdrempel: óf het loont beslist de DP per uur zelf
                 sell_ok=self.sell_enabled,
+                dt_h=dts[k],
             ))
+
+        # zelfvoorzienend-profiel: overschrijf sell_ok naar alleen de
+        # duurste N% van de zichtbare horizon (dynamische drempel)
+        if self.sell_enabled and self.sell_top_pct > 0:
+            all_prices = sorted((s.price_imp for s in steps), reverse=True)
+            cutoff_idx = max(0, len(all_prices) * self.sell_top_pct // 100)
+            threshold = all_prices[cutoff_idx]
+            for s in steps:
+                s.sell_ok = s.price_imp >= threshold
 
         tv = P.terminal_value_from_prices(
             [step.price_imp for step in steps], self.params)
@@ -647,12 +728,14 @@ class WattsonCoordinator:
             "pv_rest_vandaag_kwh": round(self.pv.remain_kwh(), 1),
             "pv_morgen_kwh": round(self.pv.tomorrow_kwh(), 1),
             "ev_laadt": context.ev_now,
-            "horizon_uren": len(steps),
+            "horizon_uren": round(sum(s.dt_h for s in steps), 1),
             "eindwaarde_restlading": round(context.terminal_value, 3),
             "verkopen_actief": self.sell_enabled,
-            "vul_modus": self.fill_mode,
             "voorkeur_zelfvoorziening_eur_kwh": self.params.alpha,
             "scenario": self.scenario.label(context.today),
+            "profiel": (f"adaptief: {len(self.load_profile.learned)}/48 slots "
+                        f"geleerd (baseline {self.trained_at})"),
+            **self._calibration_note(),
             "wedge_effectief": round(context.wedge, 3),
         }
         if self.netting.configured and self.netting.headroom_kwh is not None:
@@ -677,8 +760,16 @@ class WattsonCoordinator:
             self.params,
             lambda when: dt_util.as_local(when).strftime("%H:%M"),
         )
+        self.plan_slots = PS.plan_slots(
+            context.prices,
+            steps,
+            evaluation.setpoints,
+            context.soc_kwh,
+            self.params,
+            lambda when: dt_util.as_local(when).strftime("%H:%M"),
+        )
 
-    def _stabilize_decision(
+    async def _stabilize_decision(
         self,
         previous: Decision,
         context: PS.PlanningContext,
@@ -701,30 +792,11 @@ class WattsonCoordinator:
         if (previous.mode in stickable and self.mode in stickable
                 and self.mode is not previous.mode
                 and not context.ev_now and len(steps) > 1):
-            # Een door de DP gekozen laadstart die volledig uit het actuele
-            # zonneoverschot past, meteen uitvoeren. De algemene euro-deadband
-            # is bedoeld tegen relaispendelen bij vlakke handel, maar hield ook
-            # een aantoonbaar goedkoopste zonne-uur op rust terwijl exact
-            # dezelfde lading naar het iets duurdere volgende uur schoof.
-            # Kleine restsetpoints blijven wel gedempt; de 300 W-grens is
-            # dezelfde apparaatbescherming als de realtime overschot-assist.
-            solar_surplus = max(steps[0].pv_w - steps[0].load_w, 0.0)
-            solar_backed_start = (
-                previous.mode is AdviceMode.IDLE
-                and self.mode is AdviceMode.CHARGE
-                and self.setpoint_w >= ASSIST_EXPORT_W
-                and solar_surplus >= self.setpoint_w
-            )
-            if solar_backed_start:
-                self._switch_debt = 0.0
-                self._last_mode_switch = time.monotonic()
-                return
             forced = 0.0 if previous.mode is AdviceMode.IDLE else previous.setpoint_w
             c0, soc1, _, _ = P.hour_result(
                 steps[0], forced, context.soc_kwh, self.params)
-            _, rest = P.plan(
-                steps[1:], soc1, self.params,
-                terminal_value=context.terminal_value)
+            _, rest = await self.hass.async_add_executor_job(
+                P.plan, steps[1:], soc1, self.params, context.terminal_value)
             voordeel = max((c0 + rest) - evaluation.cost, 0.0)
             # Een oude laad/ontlaadstand die door SoC-, PV- of lastgrenzen
             # fysiek niets meer kan doen, mag nooit door de euro-demping blijven
@@ -740,8 +812,39 @@ class WattsonCoordinator:
             else:
                 self._switch_debt += voordeel
             dwelling = time.monotonic() - self._last_mode_switch < PLAN_MIN_DWELL_S
+            # overbrugging van een korte pauze: zelfde actie hervat binnen
+            # BRIDGE_GAP_H uur tegen (vrijwel) dezelfde prijs -> doorgaan
+            bridge = None
+            if (not stale_active_mode and self.mode is AdviceMode.IDLE
+                    and previous.mode in (AdviceMode.CHARGE, AdviceMode.DISCHARGE)):
+                sign = 1.0 if previous.mode is AdviceMode.CHARGE else -1.0
+                elapsed_h = 0.0
+                for k in range(1, len(evaluation.setpoints)):
+                    elapsed_h += steps[k - 1].dt_h
+                    if elapsed_h > BRIDGE_GAP_H + 1e-9:
+                        break
+                    sp_k = evaluation.setpoints[k]
+                    if sp_k * sign > 50.0 and abs(steps[k].price_imp - steps[0].price_imp) <= BRIDGE_MAX_DPRICE:
+                        bridge = (k, sp_k)
+                        break
+            _LOGGER.info(
+                "Wattson wisseldemping: %s -> %s | voordeel €%.4f/tick, schuld €%.4f, dwell %s, overbrugging %s",
+                previous.mode.value, self.mode.value, voordeel, self._switch_debt, dwelling, bridge)
             if stale_active_mode:
                 pass
+            elif bridge is not None:
+                k, sp_k = bridge
+                hold_w = max(abs(previous.setpoint_w), abs(sp_k)) if previous.mode is AdviceMode.CHARGE else previous.setpoint_w
+                self._switch_debt = 0.0
+                self.set_decision(replace(
+                    self.decision,
+                    mode=previous.mode,
+                    setpoint_w=(abs(hold_w) if previous.mode is AdviceMode.CHARGE else -abs(hold_w)),
+                    reason=(f"houdt {previous.mode.value} vast — hervat toch om "
+                            f"{self.plan_slots[k]['tijd']} "
+                            f"(€{steps[k].price_imp:.3f} vs nu €{steps[0].price_imp:.3f}); "
+                            "pauze zou alleen een relaisklik kosten"),
+                ))
             elif self._switch_debt < SWITCH_DEADBAND_EUR:
                 self.set_decision(replace(
                     self.decision,
@@ -821,6 +924,12 @@ class WattsonCoordinator:
                     surplus_w >= abs(self.setpoint_w) or blijf_overschot):
                 await self.set_battery(
                     BatteryAction.SURPLUS_CHARGE, abs(self.setpoint_w))
+            elif (not self.caps.p1_matching and self._last_action == "laden"
+                    and self._last_charge_w >= abs(self.setpoint_w)):
+                # al aan het laden op een vaste adapter: de laadregelaar volgt
+                # het overschot boven het plan; niet elke tick terugzetten
+                # (ongewijzigde waarde = geen write)
+                await self.set_battery(BatteryAction.CHARGE, self._last_charge_w)
             else:
                 await self.set_battery(
                     BatteryAction.CHARGE, abs(self.setpoint_w))
@@ -829,7 +938,16 @@ class WattsonCoordinator:
             await self.set_battery(BatteryAction.SELL, abs(self.setpoint_w))
         elif self.mode is AdviceMode.DISCHARGE and not context.ev_now:
             self.assist_active = None
-            await self.set_battery(BatteryAction.DISCHARGE, abs(self.setpoint_w))
+            if (not self.caps.p1_matching and self._last_action == "ontladen"
+                    and self._last_discharge_w > 0):
+                # al aan het ontladen op een vaste adapter: de ontlaadregelaar
+                # volgt de gemeten huislast; het plan-setpoint is een
+                # verwachting en mag dat niet elke tick overschrijven
+                # (ongewijzigde waarde = geen write, geen herstart)
+                await self.set_battery(
+                    BatteryAction.DISCHARGE, self._last_discharge_w, p1_cap=False)
+            else:
+                await self.set_battery(BatteryAction.DISCHARGE, abs(self.setpoint_w))
         elif self.mode is AdviceMode.DISCHARGE and context.ev_now:
             # v1.9: EV laadt — de accu dekt alléén het huisdeel. De wallbox
             # meet zijn eigen vermogen, dus de EV-gecorrigeerde huislast
@@ -917,11 +1035,141 @@ class WattsonCoordinator:
             self.safety.note_own_stop(
                 "laden" if previous_action.is_charge else "ontladen")
         self._last_action = action
+        self._last_command_at = dt_util.utcnow()
         self._last_charge_w = applied if action.is_charge else 0.0
         self._last_discharge_w = applied if action.is_discharge else 0.0
         self.export_recovery.note_action(action.value)
         self.track.note_applied(action.value, applied)
+        self.discharge_ctl.note_applied(action.value, applied)
+        self.charge_ctl.note_applied(action.value, applied)
         return applied
+
+    @callback
+    def _soc_changed(self, event) -> None:
+        new = event.data.get("new_state")
+        if new is None:
+            return
+        try:
+            self._soc_hist.append(float(new.state))
+        except (ValueError, TypeError):
+            pass
+
+    def soc_pct(self) -> float | None:
+        """SoC-percentage voor waardering: mediaan van de laatste metingen.
+
+        De kale sensor dithert ±5% rond de vloer terwijl de accu stilstaat;
+        lambda en de vloer/plafond-prijzen rekenen hierop, dus die jitter werd
+        rechtstreeks waarde-ruis. Mediaan-van-3 laat echte laad/ontlaad-trends
+        (1%/~2 min bij vol vermogen) vrijwel ongemoeid en dooft de dither.
+        """
+        cur = self.t.f(self.ent_soc)
+        if cur is None:
+            return None
+        vals = list(self._soc_hist) + [cur]
+        return statistics.median(vals)
+
+    async def _realized_tick(self, _now) -> None:
+        """Boekhouding: integreer gemeten accuvermogen x actuele prijs.
+
+        Onder saldering is vermeden import en export beide de uurprijs waard,
+        dus ontladen telt als opbrengst tegen de actuele prijs, laden als
+        kosten. Dagwissel schuift het totaal in de historie (14 dagen).
+        """
+        r = self.realized
+        today = dt_util.now().date().isoformat()
+        if r["datum"] != today:
+            if r["datum"] is not None and (r["laad_kwh"] + r["ontlaad_kwh"]) > 0.01:
+                r["dagen"] = ([{
+                    "datum": r["datum"],
+                    "netto": round(r["opbrengst"] - r["kosten"], 2),
+                    "kosten": round(r["kosten"], 2),
+                    "opbrengst": round(r["opbrengst"], 2),
+                    "laad_kwh": round(r["laad_kwh"], 2),
+                    "ontlaad_kwh": round(r["ontlaad_kwh"], 2),
+                }] + r["dagen"])[:14]
+            r.update({"datum": today, "kosten": 0.0, "opbrengst": 0.0,
+                      "laad_kwh": 0.0, "ontlaad_kwh": 0.0})
+        prijs = self.t.current_price()
+        if prijs is not None:
+            ent_chg, ent_dis = self.bat_flow_entities()
+            chg = self.t.fresh_power_w(ent_chg) or 0.0
+            dis = self.t.fresh_power_w(ent_dis) or 0.0
+            if chg > 0.0:
+                kwh = chg / 60000.0
+                r["laad_kwh"] += kwh
+                r["kosten"] += kwh * prijs
+            if dis > 0.0:
+                kwh = dis / 60000.0
+                r["ontlaad_kwh"] += kwh
+                r["opbrengst"] += kwh * prijs
+        self._realized_store.async_delay_save(lambda: dict(self.realized), 300)
+        if self.realized_sensor is not None:
+            self.realized_sensor.async_write_ha_state()
+
+    def _next_calibration(self):
+        if not self.ent_calibration:
+            return None
+        st = self.hass.states.get(self.ent_calibration)
+        if st is None or st.state in ("unknown", "unavailable"):
+            return None
+        try:
+            return dt_util.parse_datetime(st.state)
+        except (ValueError, TypeError):
+            return None
+
+    async def _apply_soc_ceiling(self) -> None:
+        """Planplafond + apparaatplafond: max_soc_pct, of 100% in het
+        kalibratievenster (CAL_LEAD_H vóór next_calibration tot de accu vol
+        is geweest — dan schuift next_calibration zelf 30 dagen op)."""
+        when = self._next_calibration()
+        self.cal_window = (
+            when is not None
+            and when - dt_util.utcnow() <= timedelta(hours=CAL_LEAD_H)
+            and self._max_soc_pct < 100.0)
+        self.params.soc_max_kwh = (
+            self.params.capacity_kwh if self.cal_window else self._soc_max_cfg_kwh)
+        if self.ent_zd_socset and self.control_enabled:
+            # ongewijzigd = geen write (set_number vergelijkt)
+            await A.set_number(
+                self.hass, self.ent_zd_socset,
+                100.0 if self.cal_window else self._max_soc_pct)
+
+    def _calibration_note(self) -> dict:
+        """Kalibratie-informatie voor de attributen: venster actief (plafond
+        tijdelijk 100%) of binnen 24 u verwacht (SoC-meting kan drijven)."""
+        when = self._next_calibration()
+        if when is None:
+            return {}
+        delta = when - dt_util.utcnow()
+        if self.cal_window:
+            return {"kalibratie": (
+                f"kalibratievenster: plafond tijdelijk 100% (i.p.v. "
+                f"{self._max_soc_pct:.0f}%) tot de accu vol is geweest")}
+        if timedelta(0) <= delta <= timedelta(hours=24):
+            uren = int(delta.total_seconds() // 3600)
+            return {"kalibratie": (
+                f"accu kalibreert over ~{uren} u — SoC-meting kan drijven")}
+        return {}
+
+    def _note_load_sample(self, now, load_w: float) -> None:
+        """Verzamel lastmetingen per lokaal klokuur; rond een vol uur af.
+
+        De plan-tick draait elke 10 min (plus prijs-events), dus een vol uur
+        levert >= 6 metingen. Pas bij de overgang naar een nieuw uur wordt het
+        gemiddelde als waarneming aan het profiel gevoerd — een half bemeten
+        uur (herstart, telemetrie-uitval) haalt de drempel niet en leert niets.
+        """
+        hour = dt_util.as_local(now).replace(minute=0, second=0, microsecond=0)
+        if self._load_hour is not None and hour != self._load_hour:
+            if len(self._load_samples) >= 4:
+                self.load_profile.observe(
+                    self._load_hour,
+                    sum(self._load_samples) / len(self._load_samples))
+                self._profile_store.async_delay_save(
+                    lambda: {"learned": self.load_profile.as_stored()}, 60)
+            self._load_samples = []
+        self._load_hour = hour
+        self._load_samples.append(load_w)
 
     async def _apply_command(self, command: BatteryCommand) -> float:
         """Enige ongearbitreerde doorgang naar een merkadapter."""

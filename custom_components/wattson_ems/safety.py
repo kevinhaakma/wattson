@@ -11,7 +11,14 @@ from datetime import datetime
 
 from homeassistant.util import dt as dt_util
 
-from .const import GEENDATA_STOP_S, WATCH_RUNAWAY_W, WATCH_STOP_GRACE_S
+from .const import (
+    GEENDATA_RELOAD_COOLDOWN_S,
+    GEENDATA_RELOAD_S,
+    GEENDATA_STOP_S,
+    STARTUP_GRACE_S,
+    WATCH_RUNAWAY_W,
+    WATCH_STOP_GRACE_S,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -27,6 +34,7 @@ class Safety:
         self._stopped_richting: str | None = None  # ...deze richting geen runaway
         self._data_ok_at: datetime | None = None
         self._safe_stopped = False
+        self._started_at = time.monotonic()
 
     def note_own_stop(self, richting: str) -> None:
         """Eigen stopcommando geregistreerd: het apparaat loopt (cloud-latentie)
@@ -59,12 +67,6 @@ class Safety:
         c = self.c
         if not c.control_enabled:
             return
-        # Tijdens de eerste opstarttick kunnen apparaatselects al hersteld zijn
-        # terwijl prijs/SoC nog ontbreken. _plan_and_apply commandeert in die
-        # fase expliciet rust. Een watchdog-trip vóór het eerste geldige plan
-        # zou die gecontroleerde herstelactie juist blokkeren.
-        if not c._had_success and c.mode.value in ("init", "geen data"):
-            return
         ent_chg, ent_dis = c.bat_flow_entities()
         dis = c.t.fresh_power_w(ent_dis)
         chg = c.t.fresh_power_w(ent_chg)
@@ -82,6 +84,15 @@ class Safety:
         elif dis is not None and dis > c.params.p_discharge_max_w + 500:
             afwijking = f"ontlaadvermogen {dis:.0f} W ver boven limiet"
             richting = "ontladen"
+        if (afwijking and self.c._last_action is None
+                and time.monotonic() - self._started_at < STARTUP_GRACE_S):
+            # (her)start-grace: er is nog geen eigen commando gegeven, dus dit
+            # vermogen is geërfd van vóór de reload (de vorige instantie
+            # stuurde rust bij unload; het apparaat loopt door cloud-latentie
+            # nog uit). De stop-grace-status zelf overleeft een reload niet.
+            _LOGGER.debug(
+                "Wattson watchdog: %s genegeerd (startup-grace)", afwijking)
+            return
         if afwijking and richting == self._stopped_richting and time.monotonic() < self._stop_grace_until:
             # uitloop van een zojuist zelf gestopte actie: het apparaat heeft
             # cloud-latentie en mag binnen de grace nog in die richting actief
@@ -134,7 +145,32 @@ class Safety:
         if self._data_ok_at is None:
             self._data_ok_at = now
             return
-        if not self._safe_stopped and (now - self._data_ok_at).total_seconds() > GEENDATA_STOP_S:
+        stil = (now - self._data_ok_at).total_seconds()
+        # Herladen alleen als de integratie écht niets meer MELDT (last_reported),
+        # niet als de waarden alleen constant zijn (last_updated staat dan ook
+        # stil — bewuste idle-hardening hieronder blijft daarop werken).
+        gemeld = [c.t.live_power_w(e, GEENDATA_RELOAD_S) for e in (c.ent_soc, ent_chg, ent_dis) if e]
+        stil_melding = all(v is None for v in gemeld)
+        # Alleen herladen als er een ACTIEF commando staat dat niet terugkomt:
+        # in rust zijn constante waarden normaal (06-09 15:17/15:32: reload elke
+        # 15 min in rust, elke reload = relaisklik).
+        actief = c._last_action in ("laden", "laden_overschot", "ontladen", "verkopen")
+        # ...en dat commando moet zelf al GEENDATA_RELOAD_S oud zijn: stilte uit de
+        # rustperiode ervoor telt niet (06-09 18:00: reload op het startmoment van
+        # de ontlading -> integratie 3 min weg, klik, late start)
+        cmd_at = getattr(c, "_last_command_at", None)
+        cmd_oud = cmd_at is not None and (now - cmd_at).total_seconds() > GEENDATA_RELOAD_S
+        last_reload = getattr(self, "_last_reload_at", None)
+        if (stil > GEENDATA_RELOAD_S and stil_melding and actief and cmd_oud and c.ent_soc
+                and (last_reload is None or (now - last_reload).total_seconds() > GEENDATA_RELOAD_COOLDOWN_S)):
+            self._last_reload_at = now
+            _LOGGER.warning("Wattson: accu-telemetrie %.0f s stil — accu-integratie herladen via %s", stil, c.ent_soc)
+            try:
+                await c.hass.services.async_call(
+                    "homeassistant", "reload_config_entry", {"entity_id": c.ent_soc}, blocking=False)
+            except Exception:  # noqa: BLE001
+                _LOGGER.exception("Wattson: herladen accu-integratie faalde")
+        if not self._safe_stopped and stil > GEENDATA_STOP_S:
             self._safe_stopped = True
             c.assist_active = None
             await c.emergency_stop(None)

@@ -21,7 +21,10 @@
           "ent_wallbox_2_thuis": "EV 2 thuis-gate (optioneel; laden elders telt niet mee)",
           "ent_pv_now": "Actueel PV-vermogen (optioneel)",
           "ent_pv_remain": "Resterende PV-energie vandaag (optioneel)",
-          "ent_pv_tomorrow": "PV-energie morgen (optioneel)"
+          "ent_pv_tomorrow": "PV-energie morgen (optioneel)",
+          "ent_pv_uur_nu": "PV-forecast dit uur (kWh, optioneel)",
+          "ent_pv_uur_volgend": "PV-forecast volgend uur (kWh, optioneel)",
+          "ent_kalibratie": "Geplande accu-kalibratie (datetime, optioneel)"
         }
       },
       "adapter": {
@@ -34,6 +37,7 @@
           "ent_zd_outlim": "Zendure ontlaadlimiet",
           "ent_zd_acmode": "Zendure AC-mode (input/output, sterk aanbevolen)",
           "ent_zd_hems": "Zendure HEMS / AI-status (optioneel)",
+          "ent_zd_socset": "Zendure SoC-plafond (number socSet, optioneel)",
           "ent_zd_chg": "Zendure gemeten laadvermogen (optioneel)",
           "ent_zd_dis": "Zendure gemeten ontlaadvermogen (optioneel)",
           "ent_ms_mode": "Marstek force-mode",
@@ -52,6 +56,7 @@
         "data": {
           "capacity_kwh": "Bruikbare capaciteit (kWh)",
           "min_soc_pct": "Minimaal laadniveau (%)",
+          "max_soc_pct": "Maximaal laadniveau (%)",
           "p_charge_max_w": "Maximaal laadvermogen (W)",
           "p_discharge_max_w": "Maximaal ontlaadvermogen (W)",
           "wedge_post_saldering": "Exportprijs-korting na einde saldering (EUR/kWh, vanaf 2027)",
@@ -92,6 +97,7 @@
           "ent_zd_outlim": "Accu output-limiet (ontladen, number-entiteit)",
           "ent_zd_acmode": "Accu AC-mode select (input/output, sterk aanbevolen)",
           "ent_zd_hems": "Accu HEMS/AI-modus status (binary_sensor)",
+          "ent_zd_socset": "Zendure SoC-plafond (number socSet, optioneel)",
           "ent_zd_chg": "Accu laadvermogen sensor (optioneel)",
           "ent_zd_dis": "Accu ontlaadvermogen sensor (optioneel)",
           "ent_bat_chg": "Accu laadvermogen sensor (optioneel, nodig voor watchdog)",
@@ -102,6 +108,7 @@
           "ent_gen_discharge": "Generiek: ontlaadvermogen-number (W)",
           "capacity_kwh": "Accucapaciteit (kWh)",
           "min_soc_pct": "Minimale SoC (%)",
+          "max_soc_pct": "Maximale SoC (%)",
           "p_charge_max_w": "Max laadvermogen (W)",
           "p_discharge_max_w": "Max ontlaadvermogen (W)",
           "ent_ms_mode": "Marstek: force-mode entity (select of number, 0=stop/1=laden/2=ontladen)",
@@ -109,7 +116,10 @@
           "ent_ms_discharge": "Marstek: forcible ontlaadvermogen-number (W)",
           "wedge_post_saldering": "Exportprijs-korting na einde saldering (EUR/kWh, vanaf 2027)",
           "ent_import_totalen": "Totaaltellers import (jaarsaldering-bewaking, optioneel)",
-          "ent_export_totalen": "Totaaltellers export (jaarsaldering-bewaking, optioneel)"
+          "ent_export_totalen": "Totaaltellers export (jaarsaldering-bewaking, optioneel)",
+          "ent_pv_uur_nu": "PV-forecast dit uur (kWh, optioneel)",
+          "ent_pv_uur_volgend": "PV-forecast volgend uur (kWh, optioneel)",
+          "ent_kalibratie": "Geplande accu-kalibratie (datetime, optioneel)"
         }
       }
     },

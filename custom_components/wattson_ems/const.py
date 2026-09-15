@@ -20,9 +20,18 @@ CONF_ENT_WALLBOX_2_HOME = "ent_wallbox_2_thuis"
 CONF_ENT_PV_NOW = "ent_pv_now"
 CONF_ENT_PV_REMAIN = "ent_pv_remain"
 CONF_ENT_PV_TOMORROW = "ent_pv_tomorrow"
+# uur-forecast van de PV-bron (optioneel, bv. Forecast.Solar
+# energy_current_hour / energy_next_hour): scherpt de eerste twee planuren
+# aan waar de generieke daglicht-bel het slechtst timet
+CONF_ENT_PV_HOUR_NOW = "ent_pv_uur_nu"
+CONF_ENT_PV_HOUR_NEXT = "ent_pv_uur_volgend"
+# geplande accu-kalibratie (optioneel, bv. Zendure next_calibration): rond een
+# kalibratiecyclus drijft de SoC-meting — Wattson waarschuwt in de attributen
+CONF_ENT_CALIBRATION = "ent_kalibratie"
 CONF_ENT_ZD_OPERATION = "ent_zd_operation"
 CONF_ENT_ZD_MANUAL = "ent_zd_manual"
 CONF_ENT_ZD_HEMS = "ent_zd_hems"
+CONF_ENT_ZD_SOCSET = "ent_zd_socset"   # SoC-plafond-number van het apparaat (socSet)
 CONF_ENT_ZD_CHG = "ent_zd_chg"
 CONF_ENT_ZD_DIS = "ent_zd_dis"
 CONF_ENT_ZD_INLIM = "ent_zd_inlim"    # number.*_input_limit (max laadvermogen)
@@ -59,6 +68,9 @@ CONF_ENT_BAT_DIS = "ent_bat_dis"
 # accu-eigenschappen (instelbaar per installatie)
 CONF_CAPACITY = "capacity_kwh"
 CONF_MIN_SOC_PCT = "min_soc_pct"
+CONF_MAX_SOC_PCT = "max_soc_pct"   # planplafond; LiFePO4 veroudert het snelst
+                                   # vol geladen — 90 kost ~0,6 kWh handel op
+                                   # donkere dagen, spaart kalenderleven
 CONF_P_CHARGE = "p_charge_max_w"
 CONF_P_DISCHARGE = "p_discharge_max_w"
 
@@ -108,9 +120,13 @@ DEFAULT_OPTIONS = {
     CONF_ENT_PV_NOW: "",
     CONF_ENT_PV_REMAIN: "",
     CONF_ENT_PV_TOMORROW: "",
+    CONF_ENT_PV_HOUR_NOW: "",
+    CONF_ENT_PV_HOUR_NEXT: "",
+    CONF_ENT_CALIBRATION: "",
     CONF_ENT_ZD_OPERATION: "",
     CONF_ENT_ZD_MANUAL: "",
     CONF_ENT_ZD_HEMS: "",
+    CONF_ENT_ZD_SOCSET: "",
     CONF_ENT_ZD_CHG: "",
     CONF_ENT_ZD_DIS: "",
     CONF_ENT_ZD_INLIM: "",
@@ -127,6 +143,7 @@ DEFAULT_OPTIONS = {
     CONF_ENT_BAT_DIS: "",
     CONF_CAPACITY: _BAT_CAPACITY,
     CONF_MIN_SOC_PCT: _BAT_MIN_SOC_PCT,
+    CONF_MAX_SOC_PCT: 100.0,
     CONF_P_CHARGE: _BAT_P_CHARGE,
     CONF_P_DISCHARGE: _BAT_P_DISCHARGE,
     CONF_WEDGE_POST: 0.10,
@@ -145,6 +162,10 @@ ASSIST_IMPORT_W = 150      # huis-import waarboven piek-assist mag starten
                            # track-deadband; kleinere piekjes zijn ruis)
 ASSIST_EXPORT_W = 300      # export waarboven overschot-assist mag starten
 ASSIST_STOP_W = 40         # pas stoppen als bronvraag/overschot vrijwel nul is
+ASSIST_STOP_MARGIN_EUR = 0.02  # STOP-hysterese: een lopende assist stopt pas als de
+                               # λ-vergelijking dit ver de andere kant op is (06-09
+                               # 17:12: stop op €0,005 marge, 48 min voor het plan
+                               # dezelfde actie startte = 2 relaiskliks voor centen)
 ASSIST_MARGIN_EUR = 0.005  # hysterese op de λ-vergelijking: prijs moet dit
                            # boven de vloer / onder het plafond liggen
 ASSIST_THROTTLE_S = 10     # minimale tijd tussen assist-beslissingen — gelijk
@@ -159,24 +180,52 @@ DISCHARGE_EXPORT_ABORT_HOLD_S = 15  # bevestig over meerdere P1-updates; normale
                                     # smart-charge-regelruis bleef binnen ±124 W
 ASSIST_STOP_GRACE_S = 150  # "voorbij" moet zo lang aanhouden vóór echt stoppen:
                            # vangt wolk-dips en stale telemetrie af zonder gecycle
-ASSIST_DISCHARGE_QUIET_S = 300  # piek-assist-ontladen start pas als er zo lang
-                                # geen bronexport is waargenomen: bij wisselend
-                                # zonweer wisselen importpiekjes en overschot
-                                # elkaar per minuut af en breekt de export-
-                                # bewaking elk gestart ontladen direct weer af
-                                # (gemeten 14..23-07: 57 van 138 assist-starts
-                                # binnen 3 min afgebroken, mediaan 30-80 s)
 ASSIST_MIN_RUN_S = 180     # opwarmtijd na assist-start: accutelemetrie (60s-poll)
                            # loopt achter, dus "voorbij" is hier geen stopbewijs;
                            # harde stops (SoC-vol, EV) blijven wél direct gelden
+
+# --- bronsignaal (SourcePower): één gefilterde kijk op de netflow ------------
+# De P1-meter levert losse momentopnames en die bevatten uitschieters van één
+# sample: gemeten 12-08 17:00-19:00 stond het huis onafgebroken op -1600..-2250 W
+# export, met daartussen enkelvoudige samples van +118 tot +2026 W. De assist
+# startte op precies die samples een ontlading, waarna de export-recovery hem
+# 15-60 s later terecht afbrak: 12 start/afbreek-paren op twee avonden, en twee
+# keer een echte ontlading die volledig het net op liep (18:42-18:51 700 W bij
+# een P1 van -350 W). Een beslissing mag daarom nooit op één sample rusten: de
+# afwijking moet een heel venster aanhouden, in zowel de kale als de
+# accu-gecorrigeerde meting (wijken die uiteen, dan is er geen bewijs en doet
+# Wattson niets — fail-safe).
+SOURCE_WINDOW_S = 180      # bewaarvenster van bron-samples (≥ het langste
+                           # confirm-venster hieronder)
+SOURCE_MIN_SAMPLES = 2     # minimaal aantal metingen in een confirm-venster;
+                           # tijdsdekking alléén is te weinig bewijs bij een
+                           # meter die even stil valt
+ASSIST_START_CONFIRM_S = 30  # piek/overschot moet dit hele venster aanhouden
+                             # voordat de assist mag starten. Bewust kort
+                             # (reactiesnelheid boven maximale demping, keuze
+                             # 2026-08-13): ~20 s wachten bij de 10s-cadans van
+                             # de P1. Sweep op 2,5 dag echte meterdata:
+                             #   direct:  348 starts, 161 vals
+                             #   30s/2:   134 starts,  33 vals  <- gekozen
+                             #   60s/4:    54 starts,   2 vals
+                             # Korter dan 30 s kan niet: de meter valt tot 20 s
+                             # stil (p99) en dan klappert het venster op zijn
+                             # eigen cadans. Terug naar 60/4 als het relais te
+                             # vaak cyclet; de min-run/stop-grace dempen na de
+                             # start het restant.
+
 # demping laden <-> overschotladen: demotie naar vast netladen alleen als het
 # overschot het geplande vermogen dit hele venster niet droeg (piek-geheugen;
 # een wolkgat op het tick-moment is geen bewijs)
 SURPLUS_DEMOTE_WINDOW_S = 300
+# promotie vast netladen -> overschotladen eist AANGEHOUDEN export: de kale
+# P1 moet het hele SourcePower-confirmvenster (ASSIST_START_CONFIRM_S) onder
+# -SURPLUS_PROMOTE_W liggen. Gemeten 03-09: één P1-sample van -400 W in een
+# wolkgat promoveerde 7x naar smart_charging, dat daarna op ~300 W bleef
+# hangen tot de volgende plantick — 149 van 219 dalminuten op een derde van
+# het geplande vermogen, accu 57% i.p.v. vol.
+SURPLUS_PROMOTE_W = 300
 SURPLUS_DEMOTE_MARGIN_W = 300
-FILL_FULL_MARGIN_KWH = 0.10  # vul-modus meldt "vol" binnen deze marge onder
-                             # soc_max (gereconstrueerd; origineel van de
-                             # 17-07-deploy ging met de pycache verloren)
 UPDATE_MINUTES = 10        # her-plan interval; realtime werk (bijspringen,
                            # EV-guard, discharge-guard) is event-gedreven en
                            # de veiligheid draait apart op WATCH_INTERVAL_S
@@ -187,9 +236,19 @@ DAGLICHT = (7, 21)         # uren waarbinnen de PV-bel wordt verdeeld
 WATCH_FRESH_S = 180        # meetwaarde ouder dan dit telt niet als bewijs
 WATCH_RUNAWAY_W = 300      # accuvermogen boven dit zonder opdracht = runaway
 GEENDATA_STOP_S = 600      # telemetrie zo lang stil met sturing aan -> veilig stoppen
+GEENDATA_RELOAD_S = 300    # eerder al: accu-integratie herladen (homeassistant.reload_config_entry
+                           # op de SoC-entity) — 05/06-09: zendure_ha verliest de cloud-MQTT en
+                           # herstelt alleen door een entry-reload; max 1x per RELOAD_COOLDOWN_S
+GEENDATA_RELOAD_COOLDOWN_S = 900
 WATCH_STOP_GRACE_S = 45    # na een eigen stopcommando loopt het apparaat door
                            # cloud-latentie nog even uit; binnen de grace is de
                            # zojuist gestopte richting geen runaway
+STARTUP_GRACE_S = 90       # na (her)start van de integratie: zolang er nog
+                           # geen eigen commando is gegeven is een draaiende
+                           # accu geen runaway maar een geërfde actie van vóór
+                           # de reload (reload wist de stop-grace-status;
+                           # gereproduceerd 2026-08-14: entry-reload tijdens
+                           # gepland laden -> valse WATCHDOG-trip)
 
 # Volgen van de gemeten vraag. Asymmetrisch, want de twee richtingen hebben
 # verschillende urgentie:
@@ -211,17 +270,47 @@ TRACK_LOWER_GRACE_S = 180  # terugnemen volgt de PIEK-vraag van dit venster:
                            # ontlaadmeting loopt achter) en elke limiet-write
                            # herstart het apparaat kort
 
-# discharge-guard (marstek/generic): het ontlaad-setpoint is daar een vast
-# vermogen; zakt de huisvraag, dan verlaagt deze altijd-actieve bewaking het
-# setpoint (nooit verhogen — dat doet de volgende plan-tick).
-DIS_GUARD_THROTTLE_S = 15
-DIS_GUARD_DEADBAND_W = 25
+# Ontlaadregelaar voor vaste-setpoint-adapters (discharge_loop.DischargeLoop,
+# ontwerp 2026-09-05). Vervangt fast()/tick()-volgen, DischargeGuard en de
+# assist-modulatie voor ontladen op deze adapters. Kern: nooit beslissen op
+# samples die nog door het eigen vorige commando vervuild zijn, en nooit naar 0.
+DIS_LOOP_LATENCY_S = 35    # commando -> zichtbaar op de P1. Gemeten Zendure
+                           # 20-30 s; sim: aanname MOET >= werkelijk zijn
+                           # (25 s bij een 40 s-apparaat: 161 writes i.p.v. 35),
+                           # te hoog kost ~10 Wh/3 u. Daarom ruim.
+DIS_LOOP_WINDOW_S = 20     # bewijsvenster na de latentie (>= 2 P1-samples)
+DIS_LOOP_MIN_SAMPLES = 2
+DIS_LOOP_DEADBAND_W = 40   # kleinere correcties niet schrijven (write = herstart)
+DIS_LOOP_FLOOR_W = 30      # nooit lager: uitschakelen is aan planner/veiligheid
+DIS_LOOP_STUCK_S = 90      # apparaat volgt het commando zo lang aantoonbaar niet
+                           # -> één schop (rust + opnieuw), max 1x per 5 min.
+                           # 05-09: na een zendure_ha-reload toonde de select
+                           # 'manual' maar stond de manager idle; Wattson schrijft
+                           # alleen bij wijziging en bleef dus eeuwig wachten
+DIS_LOOP_KICK_COOLDOWN_S = 300
+DIS_LOOP_MAX_AGE_S = 30    # mediaan over de laatste 30 s (3 samples): sim
+                           # 05-09: 90 s liet oude waarden na een sprong ~1 min
+                           # meewegen (trapsgewijs terugnemen); 30 s reageert
+                           # 30 s sneller bij gelijk aantal writes, alle latenties
+
+# kalibratievenster: de BMS herijkt zijn SoC-schatting alleen bij een volle
+# lading (zendure_ha zet next_calibration = nu + 30 d zodra electricLevel 100%
+# meldt). Met een planplafond < 100% gebeurt dat nooit meer en drijft de SoC.
+# Zoveel uur vóór next_calibration gaat het plafond (plan én apparaat) naar
+# 100% tot de accu vol is geweest; daarna terug naar max_soc_pct.
+CAL_LEAD_H = 36
 
 # wissel-demping: een modewissel (rust <-> laden/ontladen) gaat pas door als
 # het CUMULATIEVE voordeel over de horizon deze drempel overschrijdt. Stopt
 # pendelen rond break-even-prijzen zonder echte marge weg te geven: het
 # gemiste voordeel telt per tick op en de wissel volgt zodra die loont.
 SWITCH_DEADBAND_EUR = 0.02
+# overbrugging: een actieve stand (laden/ontladen) niet loslaten voor rust als
+# dezelfde actie binnen BRIDGE_GAP_H uur hervat wordt en het uurprijsverschil
+# onder BRIDGE_MAX_DPRICE blijft — elke aan/uit is een relaisklik (06-09 12:14:
+# laden gepauzeerd voor 13:00 à €0,002/kWh goedkoper = 2 kliks voor €0,001)
+BRIDGE_GAP_H = 2
+BRIDGE_MAX_DPRICE = 0.01
 PLAN_MIN_DWELL_S = 900     # na een modewissel: kleine voordelen wachten deze
                            # tijd uit, zodat vlakke (nacht)prijzen het relais
                            # niet elke tick laten schakelen
@@ -233,20 +322,21 @@ DWELL_OVERRIDE_EUR = 0.05  # een wissel die per tick zoveel oplevert (echte
 # vermogenssensor achterloopt (~1 min bij Keba/Tesla) -> één tick niet ontladen
 EV_SUSPECT_JUMP_W = 3000
 
-# agressiviteit = de knop op de doelfunctie. pref (= alpha = beta, €/kWh) is
-# de zelfvoorzienings-voorkeur: hoe duurder import/hoe onaantrekkelijker
-# export in het planningsdoel. deg is het bijbehorende plannings-
-# slijtagegewicht; beta = extra export-korting bovenop pref (asymmetrie):
-# beprijst centen-trades (reserve verkopen om hem uren later terug te kopen)
-# zonder huisdekking te raken. Combinaties komen uit de grid-search
-# (hertraind 2026-07-16 op de EV-geschoonde dataset, 95 dgn, saldering / 2027):
+# agressiviteit = de knop op de doelfunctie. pref (= alpha, €/kWh) is de
+# zelfvoorzienings-voorkeur: hoe duurder import in het planningsdoel.
+# beta = pref + beta_extra: export-korting. deg = plannings-slijtagegewicht.
+# sell_top_pct (optioneel): >0 beperkt sell_ok tot de duurste N% van de
+# zichtbare horizon (dynamische drempel i.p.v. de globale verkoopschakelaar).
+# Combinaties uit grid-search (hertraind 2026-07-16, 95 dgn, saldering / 2027):
 # agressief €166/€174 pj bij 41,6/59,1% zelfvoorziening,
 # gebalanceerd €153/€169 bij 52,3/63,0%, rustig €119/€163 bij 61,6/65,7%.
-# (De oude, veel lagere zelfvoorzieningscijfers telden onherkende EV-nachten
-# als huislast mee.)
+# zelfvoorzienend (2026-09-13, 10,7 dgn backtest): asymmetrisch alpha>>beta
+# + top-5% verkoop → 55% ZV bij slechts €4/jaar minder dan pure arbitrage.
 AGGRO_LEVELS = {
     "rustig": {"pref": 0.05, "beta_extra": 0.04, "deg": 0.02, "risk": 0.10},
     "gebalanceerd": {"pref": 0.02, "beta_extra": 0.02, "deg": 0.02, "risk": 0.05},
     "agressief": {"pref": 0.0, "beta_extra": 0.0, "deg": 0.03, "risk": 0.02},
+    "zelfvoorzienend": {"pref": 0.12, "beta_extra": -0.10, "deg": 0.02, "risk": 0.05,
+                        "sell_top_pct": 5},
 }
 AGGRO_DEFAULT = "gebalanceerd"

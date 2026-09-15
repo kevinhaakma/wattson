@@ -29,6 +29,9 @@ from .const import (
     CONF_ENT_MS_MODE,
     CONF_ENT_P1,
     CONF_ENT_PRICE,
+    CONF_ENT_CALIBRATION,
+    CONF_ENT_PV_HOUR_NEXT,
+    CONF_ENT_PV_HOUR_NOW,
     CONF_ENT_PV_NOW,
     CONF_ENT_PV_REMAIN,
     CONF_ENT_PV_TOMORROW,
@@ -41,12 +44,14 @@ from .const import (
     CONF_ENT_ZD_CHG,
     CONF_ENT_ZD_DIS,
     CONF_ENT_ZD_HEMS,
+    CONF_ENT_ZD_SOCSET,
     CONF_ENT_ZD_INLIM,
     CONF_ENT_ZD_MANUAL,
     CONF_ENT_ZD_OPERATION,
     CONF_ENT_ZD_OUTLIM,
     CONF_ENT_EXPORT_TOTALS,
     CONF_ENT_IMPORT_TOTALS,
+    CONF_MAX_SOC_PCT,
     CONF_MIN_SOC_PCT,
     CONF_P_CHARGE,
     CONF_P_DISCHARGE,
@@ -64,8 +69,9 @@ _OPTIONAL_ENTITY_KEYS = {
         CONF_ENT_WALLBOX_1, CONF_ENT_WALLBOX_2,
         CONF_ENT_WALLBOX_1_HOME, CONF_ENT_WALLBOX_2_HOME,
         CONF_ENT_PV_NOW, CONF_ENT_PV_REMAIN, CONF_ENT_PV_TOMORROW,
+        CONF_ENT_PV_HOUR_NOW, CONF_ENT_PV_HOUR_NEXT, CONF_ENT_CALIBRATION,
     ],  # adapter-onafhankelijk
-    ADAPTER_ZENDURE: [CONF_ENT_ZD_ACMODE, CONF_ENT_ZD_HEMS, CONF_ENT_ZD_CHG, CONF_ENT_ZD_DIS],
+    ADAPTER_ZENDURE: [CONF_ENT_ZD_ACMODE, CONF_ENT_ZD_HEMS, CONF_ENT_ZD_SOCSET, CONF_ENT_ZD_CHG, CONF_ENT_ZD_DIS],
     ADAPTER_MARSTEK: [CONF_ENT_BAT_CHG, CONF_ENT_BAT_DIS],
     ADAPTER_GENERIC: [
         CONF_ENT_GEN_POWER, CONF_ENT_GEN_CHARGE, CONF_ENT_GEN_DISCHARGE,
@@ -110,6 +116,9 @@ def _source_schema(options: dict) -> vol.Schema:
         _field(options, CONF_ENT_PV_NOW, "sensor", required=False),
         _field(options, CONF_ENT_PV_REMAIN, "sensor", required=False),
         _field(options, CONF_ENT_PV_TOMORROW, "sensor", required=False),
+        _field(options, CONF_ENT_PV_HOUR_NOW, "sensor", required=False),
+        _field(options, CONF_ENT_PV_HOUR_NEXT, "sensor", required=False),
+        _field(options, CONF_ENT_CALIBRATION, "sensor", required=False),
     ]))
 
 
@@ -150,6 +159,7 @@ def _battery_schema(options: dict) -> vol.Schema:
     return vol.Schema({
         vol.Required(CONF_CAPACITY, default=_value(options, CONF_CAPACITY)): vol.Coerce(float),
         vol.Required(CONF_MIN_SOC_PCT, default=_value(options, CONF_MIN_SOC_PCT)): vol.Coerce(float),
+        vol.Required(CONF_MAX_SOC_PCT, default=_value(options, CONF_MAX_SOC_PCT)): vol.Coerce(float),
         vol.Required(CONF_P_CHARGE, default=_value(options, CONF_P_CHARGE)): vol.Coerce(float),
         vol.Required(CONF_P_DISCHARGE, default=_value(options, CONF_P_DISCHARGE)): vol.Coerce(float),
         vol.Required(CONF_WEDGE_POST, default=_value(options, CONF_WEDGE_POST)): vol.Coerce(float),
@@ -192,6 +202,7 @@ def _validate(merged: dict) -> dict[str, str]:
     try:
         cap = float(merged.get(CONF_CAPACITY, 0))
         min_soc = float(merged.get(CONF_MIN_SOC_PCT, 0))
+        max_soc = float(merged.get(CONF_MAX_SOC_PCT, 100))
         p_chg = float(merged.get(CONF_P_CHARGE, 0))
         p_dis = float(merged.get(CONF_P_DISCHARGE, 0))
     except (TypeError, ValueError):
@@ -200,6 +211,8 @@ def _validate(merged: dict) -> dict[str, str]:
         errors[CONF_CAPACITY] = "must_be_positive"
     if not 0 <= min_soc < 100:
         errors[CONF_MIN_SOC_PCT] = "soc_out_of_range"
+    if not min_soc < max_soc <= 100:
+        errors[CONF_MAX_SOC_PCT] = "soc_out_of_range"
     if p_chg <= 0:
         errors[CONF_P_CHARGE] = "must_be_positive"
     if p_dis <= 0:
