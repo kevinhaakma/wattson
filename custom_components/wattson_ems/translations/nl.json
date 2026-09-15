@@ -50,7 +50,8 @@
           "ent_bat_dis": "Gemeten ontlaadvermogen accu (optioneel)",
           "ent_ms_rs485": "Marstek RS485-control-mode-switch (optioneel, register 42000)",
           "ms_device_id": "Marstek-accu (apparaat van de Local-API-integratie)",
-          "ms_service": "Marstek Local-API-integratie (auto = set_passive_mode detecteren)"
+          "ms_service": "Marstek Local-API-integratie (auto = set_passive_mode detecteren)",
+          "ent_ms_soc_target": "Marstek charge/discharge-to-SoC-number (optioneel, register 42011)"
         }
       },
       "battery": {
@@ -126,7 +127,8 @@
           "ent_kalibratie": "Geplande accu-kalibratie (datetime, optioneel)",
           "ent_ms_rs485": "Marstek RS485-control-mode-switch (optioneel, register 42000)",
           "ms_device_id": "Marstek-accu (apparaat van de Local-API-integratie)",
-          "ms_service": "Marstek Local-API-integratie (auto = set_passive_mode detecteren)"
+          "ms_service": "Marstek Local-API-integratie (auto = set_passive_mode detecteren)",
+          "ent_ms_soc_target": "Marstek charge/discharge-to-SoC-number (optioneel, register 42011)"
         }
       }
     },

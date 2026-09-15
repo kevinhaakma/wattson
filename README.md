@@ -7,7 +7,7 @@
 **Explainable smart home battery control for Home Assistant**
 
 [![HACS Custom](https://img.shields.io/badge/HACS-Custom-1565C0.svg?style=for-the-badge)](https://github.com/hacs/integration)
-[![Version](https://img.shields.io/badge/version-3.5.0-00B4B0.svg?style=for-the-badge)](#)
+[![Version](https://img.shields.io/badge/version-3.5.1-00B4B0.svg?style=for-the-badge)](#)
 [![License](https://img.shields.io/badge/license-MIT-1565C0.svg?style=for-the-badge)](#)
 [![Maintained](https://img.shields.io/badge/maintained-yes-22C55E.svg?style=for-the-badge)](#)
 
@@ -223,7 +223,25 @@ Configure:
 - optionally the RS485 control mode `switch` (register 42000): the battery
   silently ignores force registers while RS485 control is off, so Wattson
   turns the switch on before its first command when it finds it off;
+- optionally the charge/discharge-to-SoC `number` (register 42011): the
+  battery stops a forced charge at this SoC, so Wattson sets it to the plan
+  ceiling when charging (100 % in the calibration window) and to the minimum
+  SoC when discharging. Without it, a low value left behind by the app
+  silently caps every charge;
 - optional measured charge and discharge power sensors.
+
+Rest matches labels such as `standby`, `stop`, `none` and Dutch `uit`; power
+values are rounded to the entity's step (50 W on the Modbus integration).
+
+With [ViperRNMC/marstek_venus_modbus](https://github.com/ViperRNMC/marstek_venus_modbus)
+the control entities (`force_mode`, `set_charge_power`, `set_discharge_power`,
+`rs485_control_mode`, `charge_to_soc`) are **disabled by default**: enable
+them on the device page before selecting them in Wattson. That integration
+only exposes a signed `battery_power` sensor; create two template sensors
+(charge = positive part, discharge = negative part, verify the sign on your
+unit) to give Wattson's watchdog separate charge and discharge power. Venus E
+1.x/2.x units use the same force registers as v3; they have no Local API, so
+Modbus is the only control path for them.
 
 ### Generic
 
@@ -516,6 +534,14 @@ or correct operation of connected equipment.
 <div align="center">
 <sub>Built with a local pure-Python rolling-horizon planner — no cloud and no runtime dependencies.</sub>
 </div>
+
+## v3.5.1 — Marstek Modbus fixes
+
+- Rest now matches the `standby` label used by ViperRNMC/marstek_venus_modbus;
+  previously a rest command raised "geen passende optie" on that integration.
+- Number writes are rounded to the entity's step (50 W on Marstek Modbus).
+- Optional charge/discharge-to-SoC number (register 42011): plan ceiling when
+  charging, minimum SoC when discharging.
 
 ## v3.5.0 — Marstek Local API adapter
 

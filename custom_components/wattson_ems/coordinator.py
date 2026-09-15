@@ -58,6 +58,7 @@ from .const import (
     CONF_ENT_MS_CHARGE,
     CONF_ENT_MS_DISCHARGE,
     CONF_ENT_MS_RS485,
+    CONF_ENT_MS_SOC_TARGET,
     CONF_MS_DEVICE_ID,
     CONF_MS_SERVICE,
     CONF_ENT_MS_MODE,
@@ -173,6 +174,7 @@ class WattsonCoordinator:
         self.ent_ms_charge = o(CONF_ENT_MS_CHARGE)
         self.ent_ms_discharge = o(CONF_ENT_MS_DISCHARGE)
         self.ent_ms_rs485 = o(CONF_ENT_MS_RS485)
+        self.ent_ms_soc_target = o(CONF_ENT_MS_SOC_TARGET)
         self.ms_device_id = o(CONF_MS_DEVICE_ID)
         self.ms_service = o(CONF_MS_SERVICE)
         self.ent_bat_chg = o(CONF_ENT_BAT_CHG)
@@ -185,7 +187,8 @@ class WattsonCoordinator:
 
         b = cfg["battery"]
         cap = float(o(CONF_CAPACITY))
-        min_soc = float(o(CONF_MIN_SOC_PCT)) / 100.0 * cap
+        self._min_soc_pct = float(o(CONF_MIN_SOC_PCT))
+        min_soc = self._min_soc_pct / 100.0 * cap
         self._max_soc_pct = float(o(CONF_MAX_SOC_PCT) or 100.0)
         max_soc = self._max_soc_pct / 100.0 * cap
         self._soc_max_cfg_kwh = max_soc

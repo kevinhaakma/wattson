@@ -29,6 +29,7 @@ from .const import (
     CONF_ENT_MS_DISCHARGE,
     CONF_ENT_MS_MODE,
     CONF_ENT_MS_RS485,
+    CONF_ENT_MS_SOC_TARGET,
     CONF_MS_DEVICE_ID,
     CONF_MS_SERVICE,
     MS_SERVICE_AUTO,
@@ -78,7 +79,7 @@ _OPTIONAL_ENTITY_KEYS = {
         CONF_ENT_PV_HOUR_NOW, CONF_ENT_PV_HOUR_NEXT, CONF_ENT_CALIBRATION,
     ],  # adapter-onafhankelijk
     ADAPTER_ZENDURE: [CONF_ENT_ZD_ACMODE, CONF_ENT_ZD_HEMS, CONF_ENT_ZD_SOCSET, CONF_ENT_ZD_CHG, CONF_ENT_ZD_DIS],
-    ADAPTER_MARSTEK: [CONF_ENT_MS_RS485, CONF_ENT_BAT_CHG, CONF_ENT_BAT_DIS],
+    ADAPTER_MARSTEK: [CONF_ENT_MS_RS485, CONF_ENT_MS_SOC_TARGET, CONF_ENT_BAT_CHG, CONF_ENT_BAT_DIS],
     ADAPTER_MARSTEK_LOCAL: [CONF_ENT_BAT_CHG, CONF_ENT_BAT_DIS],
     ADAPTER_GENERIC: [
         CONF_ENT_GEN_POWER, CONF_ENT_GEN_CHARGE, CONF_ENT_GEN_DISCHARGE,
@@ -149,6 +150,7 @@ def _adapter_schema(options: dict) -> vol.Schema:
             _field(options, CONF_ENT_MS_CHARGE, "number"),
             _field(options, CONF_ENT_MS_DISCHARGE, "number"),
             _field(options, CONF_ENT_MS_RS485, "switch", required=False),
+            _field(options, CONF_ENT_MS_SOC_TARGET, "number", required=False),
             _field(options, CONF_ENT_BAT_CHG, "sensor", required=False),
             _field(options, CONF_ENT_BAT_DIS, "sensor", required=False),
         ]

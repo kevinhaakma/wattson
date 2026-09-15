@@ -72,8 +72,11 @@ class FakeCoordinator:
             ent_zd_outlim="", ent_zd_acmode="", ent_zd_chg="", ent_zd_dis="",
             ent_ms_mode="", ent_ms_charge="", ent_ms_discharge="", ent_gen_power="",
             ent_gen_charge="", ent_gen_discharge="", ent_bat_chg="", ent_bat_dis="",
-            ent_ms_rs485="", ms_device_id="", ms_service="auto",
+            ent_ms_rs485="", ent_ms_soc_target="", ms_device_id="", ms_service="auto",
         )
+        self._max_soc_pct = 90.0
+        self._min_soc_pct = 15.0
+        self.cal_window = False
         defaults.update(entities)
         for key, value in defaults.items():
             setattr(self, key, value)
@@ -413,6 +416,45 @@ def test_marstek():
     run(ad.apply("rust", 0.0))
     check("marstek: rust raakt de RS485-switch niet aan",
           all(d != "switch" for d, _, _ in hass.services.calls))
+
+    # ViperRNMC marstek_modbus: labels standby/charge/discharge, step 50 W,
+    # charge_to_soc-register (42011)
+    hass = FakeHass({
+        "select.ms_mode": FakeState("standby", {"options": ["standby", "charge", "discharge"]}),
+        "number.ms_chg": FakeState("0", {"min": 0, "max": 2500, "step": 50, "unit_of_measurement": "W"}),
+        "number.ms_dis": FakeState("0", {"min": 0, "max": 2500, "step": 50, "unit_of_measurement": "W"}),
+        "number.ms_soc": FakeState("80", {"min": 10, "max": 100, "step": 1}),
+        "sensor.p1": FakeState("1234", {"unit_of_measurement": "W"}),
+    })
+    c = FakeCoordinator(hass, ent_ms_mode="select.ms_mode", ent_ms_charge="number.ms_chg",
+                        ent_ms_discharge="number.ms_dis", ent_ms_soc_target="number.ms_soc",
+                        ent_p1="sensor.p1")
+    ad = A.create_adapter("marstek", c)
+    run(ad.apply("laden", 1234.0))
+    sel = [d for d in hass.services.calls if d[1] == "select_option"]
+    check("marstek(modbus): laden -> 'charge', vermogen op 50 W-raster (1250)",
+          sel and sel[-1][2]["option"] == "charge" and last_value(hass, "number.ms_chg") == 1250.0)
+    check("marstek(modbus): charge_to_soc krijgt het planplafond (90)",
+          last_value(hass, "number.ms_soc") == 90.0)
+    hass.services.calls.clear()
+    c.cal_window = True
+    run(ad.apply("laden", 1000.0))
+    check("marstek(modbus): kalibratievenster -> charge_to_soc 100",
+          last_value(hass, "number.ms_soc") == 100.0)
+    hass.services.calls.clear()
+    run(ad.apply("ontladen", 800.0))
+    check("marstek(modbus): ontladen -> soc-target op ondergrens (15), vermogen 800",
+          last_value(hass, "number.ms_soc") == 15.0 and last_value(hass, "number.ms_dis") == 800.0)
+    hass.services.calls.clear()
+    try:
+        run(ad.apply("rust", 0.0)); rust_ok = True
+    except RuntimeError:
+        rust_ok = False
+    sel = [d for d in hass.services.calls if d[1] == "select_option"]
+    check("marstek(modbus): rust matcht 'standby' (geen RuntimeError)",
+          rust_ok and sel and sel[-1][2]["option"] == "standby")
+    check("marstek(modbus): rust schrijft geen soc-target",
+          not calls_for(hass, "number.ms_soc"))
 
 
 def test_marstek_local():

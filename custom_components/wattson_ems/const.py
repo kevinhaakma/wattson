@@ -63,6 +63,11 @@ CONF_ENT_MS_DISCHARGE = "ent_ms_discharge"
 # RS485-control negeert de Venus alle force-registers; de adapter zet de
 # switch aan vóór het eerste commando als hij uit staat.
 CONF_ENT_MS_RS485 = "ent_ms_rs485"
+# optioneel: charge/discharge-to-SoC (register 42011). De Venus stopt een
+# force-laadopdracht op deze SoC; staat hij laag (bv. 80) dan haalt Wattson
+# zijn plafond nooit. De adapter zet hem bij laden op het planplafond en bij
+# ontladen op de ondergrens.
+CONF_ENT_MS_SOC_TARGET = "ent_ms_soc_target"
 
 # marstek local api (UDP, HACS-integraties jaapp/ha-marstek-local-api,
 # Flodesirat-fork, taurgis/has-marstek-local-api): sturing via de service
@@ -159,6 +164,7 @@ DEFAULT_OPTIONS = {
     CONF_ENT_MS_CHARGE: "",
     CONF_ENT_MS_DISCHARGE: "",
     CONF_ENT_MS_RS485: "",
+    CONF_ENT_MS_SOC_TARGET: "",
     CONF_MS_DEVICE_ID: "",
     CONF_MS_SERVICE: MS_SERVICE_AUTO,
     CONF_ENT_BAT_CHG: "",

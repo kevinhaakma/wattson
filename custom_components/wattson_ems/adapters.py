@@ -157,6 +157,15 @@ async def set_number(hass, entity: str, value, *, force: bool = False) -> None:
                 value = min(float(value), float(hi))
             if lo is not None:
                 value = max(float(value), float(lo))
+            # apparaten met een grove stap (Marstek Modbus: 50 W) krijgen een
+            # waarde op het raster; de integratie kapt anders zelf af
+            step = st.attributes.get("step")
+            if step and float(step) > 1.0:
+                step = float(step)
+                base = float(lo) if lo is not None else 0.0
+                value = base + round((float(value) - base) / step) * step
+                if hi is not None:
+                    value = min(value, float(hi))
         except (TypeError, ValueError):
             pass
         # ongewijzigd = normaal niet schrijven: elke write herstart de regelaar
@@ -440,6 +449,19 @@ class MarstekAdapter(BatteryAdapter):
             await c.hass.services.async_call(
                 "switch", "turn_on", {"entity_id": ent}, blocking=True)
 
+    async def _set_soc_target(self, action: str) -> None:
+        """Register 42011 (charge/discharge to SoC): laden tot het planplafond
+        (100 % in het kalibratievenster), ontladen tot de ondergrens."""
+        c = self.c
+        ent = getattr(c, "ent_ms_soc_target", "")
+        if not ent:
+            return
+        if action == "laden":
+            target = 100.0 if getattr(c, "cal_window", False) else getattr(c, "_max_soc_pct", 100.0)
+        else:
+            target = getattr(c, "_min_soc_pct", 10.0)
+        await set_number(c.hass, ent, float(target))
+
     async def apply(self, action, power_w, *, p1_cap=True):
         c = self.c
         if action == "ontladen" and p1_cap:
@@ -449,6 +471,7 @@ class MarstekAdapter(BatteryAdapter):
             power_w = min(power_w, c.params.p_discharge_max_w)
         if action != "rust":
             await self._ensure_rs485_control()
+            await self._set_soc_target(action)
         # eerst het vermogen zetten, dan de mode (volgorde die het apparaat verwacht)
         if action == "laden" and c.ent_ms_charge:
             await set_power_number(c.hass, c.ent_ms_charge, power_w)
@@ -459,7 +482,7 @@ class MarstekAdapter(BatteryAdapter):
             st = c.hass.states.get(c.ent_ms_mode)
             options = (st.attributes.get("options") if st else None) or []
             want = {
-                0: ("stop", "none", "off", "idle", "uit"),
+                0: ("stop", "standby", "none", "off", "idle", "uit", "rust"),
                 1: ("charge", "charging", "laden"),
                 2: ("discharge", "discharging", "ontladen"),
             }[mode_idx]
