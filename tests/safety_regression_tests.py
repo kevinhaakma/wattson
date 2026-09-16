@@ -137,6 +137,27 @@ class SafetyRegressions(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(c.adapter_impl.calls[-1][0], "laden")
         self.assertIsNone(c.last_error)
 
+    async def test_alive_device_with_constant_values_is_not_stale(self):
+        """16-09-2026: laadcommando bij 89% niet uitgevoerd -> SoC en 0 W
+        bleven constant, maar rssi van hetzelfde apparaat meldde elke 10 s.
+        Een levend apparaat is geen stilte, ook niet tijdens actieve sturing."""
+        c = self.coordinator()
+        await c._tick(None)
+        self.assertEqual(c.adapter_impl.calls[-1][0], "laden")
+        c.t.device_alive = lambda entity, max_age_s: True
+        H.set_state(c, c.ent_soc, 25, age_s=3600)
+        c.safety._data_ok_at = H._dt.utcnow() - timedelta(seconds=1200)
+        calls = list(c.adapter_impl.calls)
+        await c.safety.stale_guard()
+        self.assertEqual(c.adapter_impl.calls, calls)
+        self.assertFalse(c.safety.telemetry_blocked)
+        self.assertIsNone(c.last_error)
+        # apparaat écht dood -> wel stoppen en blokkeren
+        c.t.device_alive = lambda entity, max_age_s: False
+        await self.stale_stop(c)
+        self.assertEqual(c.adapter_impl.calls[-1][0], "noodstop")
+        self.assertTrue(c.safety.telemetry_blocked)
+
     async def test_missing_soc_or_prices_stops_and_recovers(self):
         for entity_kind in ("soc", "price"):
             with self.subTest(source=entity_kind):

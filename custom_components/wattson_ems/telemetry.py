@@ -54,6 +54,36 @@ class Telemetry:
             return None
         return A.read_power_w(self.hass, entity)
 
+    def device_alive(self, entity: str, max_age_s: float) -> bool | None:
+        """Leeft het APPARAAT achter `entity`? Kijkt naar álle entiteiten van
+        hetzelfde device in het entity-register: write-on-change-sensoren als
+        SoC of laadvermogen staan in rust (of bij een niet-uitgevoerd
+        commando) per definitie stil, maar rssi/spanning/temperatuur van
+        datzelfde apparaat blijven bewegen zolang de integratie pollt.
+        None = niet vast te stellen (geen register / device)."""
+        if not entity:
+            return None
+        try:
+            from homeassistant.helpers import entity_registry as er
+            reg = er.async_get(self.hass)
+            entry = reg.async_get(entity)
+            if entry is None or not entry.device_id:
+                return None
+            entries = er.async_entries_for_device(reg, entry.device_id, include_disabled_entities=False)
+        except Exception:  # noqa: BLE001 - register ontbreekt (tests) of API-wijziging
+            return None
+        if not entries:
+            return None
+        now = dt_util.utcnow()
+        for e in entries:
+            st = self.hass.states.get(e.entity_id)
+            if st is None or st.state in ("unknown", "unavailable"):
+                continue
+            reported = getattr(st, "last_reported", None) or st.last_updated
+            if (now - reported).total_seconds() <= max_age_s:
+                return True
+        return False
+
     def energy_kwh(self, entity: str) -> float | None:
         """Lees een energie-forecast als kWh; accepteert Wh, kWh en MWh."""
         value = self.f(entity)

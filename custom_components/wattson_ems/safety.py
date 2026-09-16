@@ -148,10 +148,16 @@ class Safety:
         if not c.control_enabled:
             return
         ent_chg, ent_dis = c.bat_flow_entities()
+        # Levend apparaat = elke entiteit van hetzelfde device die recent
+        # meldde (rssi, spanning, temperatuur). Onveranderde SoC/vermogens bij
+        # een levende integratie zijn dan de waarheid, geen stilte (16-09:
+        # laadcommando bij 89% niet uitgevoerd -> 0 W bleef 0 W -> onterechte
+        # blokkerende stop terwijl rssi elke 10 s binnenkwam).
         vers = (
             c.t.fresh(c.ent_soc, GEENDATA_STOP_S) is not None
             or c.t.fresh_power_w(ent_chg, GEENDATA_STOP_S) is not None
             or c.t.fresh_power_w(ent_dis, GEENDATA_STOP_S) is not None
+            or c.t.device_alive(c.ent_soc, GEENDATA_STOP_S) is True
         )
         now = dt_util.utcnow()
         if vers:
