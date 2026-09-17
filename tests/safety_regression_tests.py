@@ -94,6 +94,42 @@ class SafetyRegressions(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(c._last_charge_w, 0)
         self.assertIsNone(c.last_error)
 
+    async def test_watchdog_ignores_unstabilized_plan_decision(self):
+        """17-09-2026: het ruwe DP-besluit 'rust' stond in c.mode terwijl de
+        wisseldemping (await executor) het nog terugdraaide naar 'houdt laden
+        vast'. Een watchdog-run in dat gat zag 'rust' bij een ladende accu ->
+        trip -> 22 s off + relaisklik op elke prijsgrens."""
+        c = self.coordinator()
+        await c._tick(None)
+        self.assertEqual(c.adapter_impl.calls[-1][0], "laden")
+        ent_chg, _ = c.bat_flow_entities()
+        H.set_state(c, ent_chg, 500.0)
+        H.CLOCK.t += H.K.STARTUP_GRACE_S + 1
+        calls_before = list(c.adapter_impl.calls)
+        hold = c.decision
+        seen = {}
+
+        async def stabilize(previous, context, evaluation):
+            # ruw tussenbesluit 'rust', gelijktijdige bewakingstick, dan demping
+            c.set_decision(H.CTRL.Decision(H.CTRL.AdviceMode.IDLE, reason="ruw"))
+            seen["pending"] = c._decision_pending
+            await c.safety.watchdog()
+            c.assist.check(None)
+            c.set_decision(hold)
+
+        with patch.object(c, "_stabilize_decision", stabilize):
+            await c._tick(None)
+        self.assertTrue(seen["pending"])
+        self.assertFalse(c._decision_pending)
+        self.assertIsNone(c.safety.tripped)
+        self.assertNotIn("noodstop", [call[0] for call in c.adapter_impl.calls])
+        self.assertNotIn("rust", [call[0] for call in c.adapter_impl.calls[len(calls_before):]])
+        self.assertEqual(c._last_action, "laden")
+        # buiten de plan-tick geldt de bewaking onverkort
+        c.set_decision(H.CTRL.Decision(H.CTRL.AdviceMode.IDLE, reason="rust"))
+        await c.safety.watchdog()
+        self.assertEqual(c.safety.tripped, "laden")
+
     async def test_idle_stale_stop_does_not_deadlock_next_command(self):
         """15-09-2026: accu in rust -> write-on-change-telemetrie staat stil ->
         stiltestop -> elk nieuw commando geweigerd -> nooit meer verse data.

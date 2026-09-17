@@ -83,6 +83,11 @@ class Safety:
         c = self.c
         if not c.control_enabled:
             return
+        if getattr(c, "_decision_pending", False):
+            # plan-tick onderweg: c.mode is een ruw tussenbesluit dat de
+            # wisseldemping nog kan terugdraaien en dat nog niet is uitgevoerd.
+            # Geen oordeel; de volgende bewakingstick ziet het echte besluit.
+            return
         ent_chg, ent_dis = c.bat_flow_entities()
         dis = c.t.fresh_power_w(ent_dis)
         chg = c.t.fresh_power_w(ent_chg)

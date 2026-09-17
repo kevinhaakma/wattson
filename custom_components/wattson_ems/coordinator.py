@@ -290,6 +290,7 @@ class WattsonCoordinator:
         self.command_arbiter = CommandArbiter()
         self._tick_lock = asyncio.Lock()
         self._replan_pending = False
+        self._decision_pending = False  # ruw planbesluit nog niet gestabiliseerd/uitgevoerd
         self.listeners: list = []
         self.sensors: list = []
 
@@ -650,19 +651,29 @@ class WattsonCoordinator:
         if self._stopped or generation != self.command_arbiter.generation:
             return
         self._update_plan_outputs(context, evaluation)
-        self.set_decision(PS.decision_from_plan(
-            evaluation.setpoints[0],
-            context.steps[0],
-            context.wedge,
-            self.values.lam_now(context.soc_kwh),
-            self.plan_slots,
-        ))
-        await self._stabilize_decision(previous, context, evaluation)
-        if self._stopped or generation != self.command_arbiter.generation:
-            return
-        self._data_blocked = False
-        self._guard_suspect_ev(context)
-        await self._apply_decision(context, assist_reason)
+        # Het ruwe DP-besluit staat hieronder al in self.mode terwijl de
+        # wisseldemping (extra DP-run in de executor) het nog kan terugdraaien
+        # en de accu nog de vorige stand uitvoert. Watchdog en bijspringen
+        # mogen op dat tussenbesluit niet oordelen (17-09: 'rust' zichtbaar
+        # tijdens 'houdt laden vast' -> watchdog-trip -> 22 s off + relaisklik
+        # op elke prijsgrens).
+        self._decision_pending = True
+        try:
+            self.set_decision(PS.decision_from_plan(
+                evaluation.setpoints[0],
+                context.steps[0],
+                context.wedge,
+                self.values.lam_now(context.soc_kwh),
+                self.plan_slots,
+            ))
+            await self._stabilize_decision(previous, context, evaluation)
+            if self._stopped or generation != self.command_arbiter.generation:
+                return
+            self._data_blocked = False
+            self._guard_suspect_ev(context)
+            await self._apply_decision(context, assist_reason)
+        finally:
+            self._decision_pending = False
 
     async def _build_plan_context(self) -> PS.PlanningContext | None:
         """Lees één consistente snapshot en bouw de DP-stappen."""

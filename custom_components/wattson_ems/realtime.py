@@ -853,6 +853,8 @@ class AssistController:
         c = self.c
         if not (c.control_enabled and c.assist_enabled):
             return
+        if getattr(c, "_decision_pending", False):
+            return  # ruw tussenbesluit van een lopende plan-tick: niet op bijspringen
         if c.mode not in (AdviceMode.IDLE, AdviceMode.EV_GUARD) and not c.assist_active:
             return
         now = time.monotonic()
