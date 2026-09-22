@@ -542,6 +542,15 @@ or correct operation of connected equipment.
 <sub>Built with a local pure-Python rolling-horizon planner — no cloud and no runtime dependencies.</sub>
 </div>
 
+## v3.5.6 — v3 card: agressiviteit `zelfvoorzienend`
+
+- `www/wattson-v3-card.js` (v3.8): the `zelfvoorzienend` aggressiveness
+  level (integration since 2026-09-13) was missing from the card, so the
+  decision-tree wire crashed on every render and resize
+  (`getBoundingClientRect` on null, hundreds of console errors per day).
+  Level added; the wire now skips an unknown option instead of throwing.
+  Copy the file to `/config/www/` again and bump `?v=` on the resource.
+
 ## v3.5.2 — brand-independent v3 card
 
 - `www/wattson-v3-card.js` (v3.7) added to the repository. SoC, battery and

@@ -32,6 +32,12 @@
  * stonden hier de entity-id's van de ontwikkelaar als default: op een
  * andere installatie bleven SoC, vermogen en net leeg.
  *
+ * v3.8 (2026-09-22): agressiviteit `zelfvoorzienend` (integratie sinds 13-09)
+ * ontbrak in LEVELS: _opt() gaf null en _wire() crashte op
+ * getBoundingClientRect bij elke render/resize (ResizeObserver + rAF), de
+ * energiedraad werd nooit getekend. Optie toegevoegd; _wire() null-proof:
+ * een onbekende id slaat een draadsegment over i.p.v. de kaart te slopen.
+ *
  * type: custom:wattson-v3-card           # alleen entity is nodig
  * Stijl: overzicht "glass" (--ov-*-look), geen emojis, build-once/patch.
  */
@@ -137,7 +143,8 @@ class WattsonV3Card extends HTMLElement {
         { id: "stale", t: "meting" }, { id: "ev", t: "EV" }] },
       { key: "aggro", label: "doel", opts: [
         { id: "rustig", t: "rustig" }, { id: "gebalanceerd", t: "gebalanceerd" },
-        { id: "agressief", t: "agressief" }] },
+        { id: "agressief", t: "agressief" },
+        { id: "zelfvoorzienend", t: "zelfvoorz." }] },
       { key: "plan", label: "plan", opts: [
         { id: "laden_net", t: "net" }, { id: "laden_zon", t: "zon" },
         { id: "rust", t: "rust" }, { id: "ontladen", t: "leveren" },
@@ -780,27 +787,34 @@ class WattsonV3Card extends HTMLElement {
     const colors = { amber: WT_PAL.laden, green: WT_PAL.ontladen, red: WT_PAL.err,
                      neutral: "rgba(226,224,212,.45)" };
     const color = colors[P.tint] || colors.neutral;
+    // een onbekende optie-id (bijv. een nieuwe agressiviteit in de integratie)
+    // geeft null: dan slaat de draad dat segment over i.p.v. de kaart te slopen
     const pt = (el, edge) => {
+      if (!el) return null;
       const r = el.getBoundingClientRect();
       return [r.left - tb.left + r.width / 2, (edge === "top" ? r.top : r.bottom) - tb.top];
     };
-    const stops = [[...pt(this._opt("sturing", P.actiefId), "bottom")]];
+    const stops = [];
+    const push = (el, edge) => { const p = pt(el, edge); if (p) stops.push(p); };
+    push(this._opt("sturing", P.actiefId), "bottom");
     const blockedEl = P.blockedGate && this._opt("gates", P.blockedGate);
     if (blockedEl) {
-      stops.push(pt(blockedEl, "top"));
+      push(blockedEl, "top");
     } else {
       const gateTrack = this._q('.lvl[data-lvl="gates"] .track');
-      const gr = gateTrack.getBoundingClientRect();
-      const gx = gr.left - tb.left + gr.width / 2;
-      stops.push([gx, gr.top - tb.top]);
-      stops.push([gx, gr.bottom - tb.top]);
-      stops.push(pt(this._opt("aggro", P.aggroId), "top"));
-      stops.push(pt(this._opt("aggro", P.aggroId), "bottom"));
-      stops.push(pt(this._opt("plan", P.planId), "top"));
-      stops.push(pt(this._opt("plan", P.planId), "bottom"));
-      stops.push(pt(this._opt("rt", P.rtId), "top"));
-      stops.push(pt(this._opt("rt", P.rtId), "bottom"));
-      stops.push(pt(this._opt("device", P.modeId), "top"));
+      if (gateTrack) {
+        const gr = gateTrack.getBoundingClientRect();
+        const gx = gr.left - tb.left + gr.width / 2;
+        stops.push([gx, gr.top - tb.top]);
+        stops.push([gx, gr.bottom - tb.top]);
+      }
+      push(this._opt("aggro", P.aggroId), "top");
+      push(this._opt("aggro", P.aggroId), "bottom");
+      push(this._opt("plan", P.planId), "top");
+      push(this._opt("plan", P.planId), "bottom");
+      push(this._opt("rt", P.rtId), "top");
+      push(this._opt("rt", P.rtId), "bottom");
+      push(this._opt("device", P.modeId), "top");
     }
     svg.setAttribute("viewBox", `0 0 ${tb.width} ${tb.height}`);
     let d = "";
