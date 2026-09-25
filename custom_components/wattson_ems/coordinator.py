@@ -348,7 +348,7 @@ class WattsonCoordinator:
             else "plandata ontbreekt — sturing geblokkeerd" if self._data_blocked
             else None
         )
-        return self.safety.watch_error or self.plan_error or data_error
+        return self.safety.watch_error or self.safety.ack_error or self.plan_error or data_error
 
     @property
     def watch_error(self) -> str | None:

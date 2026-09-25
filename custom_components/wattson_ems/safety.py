@@ -7,11 +7,14 @@ from __future__ import annotations
 
 import logging
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from homeassistant.util import dt as dt_util
 
 from .const import (
+    CMD_ACK_BACKOFF_S,
+    CMD_ACK_MIN_W,
+    CMD_ACK_S,
     GEENDATA_RELOAD_COOLDOWN_S,
     GEENDATA_RELOAD_S,
     GEENDATA_STOP_S,
@@ -42,6 +45,12 @@ class Safety:
         self._stopped_while_active = False
         self._safe_stop_at: datetime | None = None
         self._started_at = time.monotonic()
+        # commando-verificatie (zie command_guard)
+        self._ack_cmd_at: datetime | None = None
+        self._ack_stage = 0
+        self._ack_stage_at: datetime | None = None
+        self._ack_muted_until: datetime | None = None
+        self.ack_error: str | None = None
 
     @property
     def telemetry_blocked(self) -> bool:
@@ -200,13 +209,7 @@ class Safety:
         last_reload = getattr(self, "_last_reload_at", None)
         if (stil > GEENDATA_RELOAD_S and stil_melding and actief and cmd_oud and c.ent_soc
                 and (last_reload is None or (now - last_reload).total_seconds() > GEENDATA_RELOAD_COOLDOWN_S)):
-            self._last_reload_at = now
-            _LOGGER.warning("Wattson: accu-telemetrie %.0f s stil — accu-integratie herladen via %s", stil, c.ent_soc)
-            try:
-                await c.hass.services.async_call(
-                    "homeassistant", "reload_config_entry", {"entity_id": c.ent_soc}, blocking=False)
-            except Exception:  # noqa: BLE001
-                _LOGGER.exception("Wattson: herladen accu-integratie faalde")
+            await self._reload_battery_integration(f"accu-telemetrie {stil:.0f} s stil")
         if not self._safe_stopped and stil > GEENDATA_STOP_S:
             self._safe_stopped = True
             self._stopped_while_active = actief
@@ -224,6 +227,124 @@ class Safety:
                 "name": "Wattson", "message": bericht,
                 "entity_id": "sensor.wattson_advies", "domain": "wattson_ems"})
 
+    async def _reload_battery_integration(self, waarom: str) -> bool:
+        """Herlaad de config-entry achter de SoC-sensor (met cooldown)."""
+        c = self.c
+        now = dt_util.utcnow()
+        last_reload = getattr(self, "_last_reload_at", None)
+        if not c.ent_soc or (last_reload is not None
+                             and (now - last_reload).total_seconds() < GEENDATA_RELOAD_COOLDOWN_S):
+            return False
+        self._last_reload_at = now
+        _LOGGER.warning("Wattson: %s — accu-integratie herladen via %s", waarom, c.ent_soc)
+        try:
+            await c.hass.services.async_call(
+                "homeassistant", "reload_config_entry", {"entity_id": c.ent_soc}, blocking=False)
+        except Exception:  # noqa: BLE001
+            _LOGGER.exception("Wattson: herladen accu-integratie faalde")
+            return False
+        return True
+
+    def _ack_reset(self) -> None:
+        if self._ack_stage:
+            _LOGGER.info("Wattson commando-verificatie: accu voert het commando weer uit")
+        self._ack_cmd_at = None
+        self._ack_stage = 0
+        self._ack_stage_at = None
+        self.ack_error = None
+
+    async def command_guard(self) -> None:
+        """Niet-uitgevoerd commando: laden/ontladen/verkopen staat >= CMD_ACK_MIN_W
+        gecommandeerd, maar het verse accuvermogen in die richting blijft < 50 W.
+
+        25-09-2026: Wattson 'laadde' 4,5 u met 2000 W op papier terwijl de accu
+        op 29 % bleef. Het apparaat leefde (rssi/spanning), dus de stale-guard
+        zweeg; de watchdog kijkt alleen naar de VERKEERDE richting. Trappen,
+        elk na CMD_ACK_S zonder bewijs: 1) commando opnieuw sturen (adapter
+        reassert), 2) accu-integratie herladen, 3) veilig stoppen + logboek +
+        persistente melding, daarna CMD_ACK_BACKOFF_S niet opnieuw escaleren.
+        """
+        c = self.c
+        if not c.control_enabled or getattr(c, "_decision_pending", False):
+            return
+        now = dt_util.utcnow()
+        if self._ack_muted_until is not None and now < self._ack_muted_until:
+            return
+        action = c._last_action
+        cmd_at = getattr(c, "_last_command_at", None)
+        if action not in ("laden", "ontladen", "verkopen") or cmd_at is None:
+            self._ack_reset()
+            return
+        setpoint = c._last_charge_w if action == "laden" else c._last_discharge_w
+        if setpoint < CMD_ACK_MIN_W:
+            self._ack_reset()
+            return
+        if self._ack_cmd_at != cmd_at:
+            # nieuw commando: nieuw meetvenster, trappen opnieuw
+            self._ack_cmd_at = cmd_at
+            self._ack_stage = 0
+            self._ack_stage_at = cmd_at
+            self.ack_error = None
+        ent_chg, ent_dis = c.bat_flow_entities()
+        ent = ent_chg if action == "laden" else ent_dis
+        flow = c.t.live_power_w(ent, CMD_ACK_S)
+        if flow is None:
+            return  # geen vers bewijs: domein van de stale-guard
+        if flow >= 50.0:
+            if self._ack_stage:
+                self._ack_reset()
+                self._ack_cmd_at = cmd_at
+                self._ack_stage_at = now
+            return
+        if (now - self._ack_stage_at).total_seconds() < CMD_ACK_S:
+            return
+        self._ack_stage += 1
+        self._ack_stage_at = now
+        omschrijving = f"{action} {setpoint:.0f} W gecommandeerd, accu levert {flow:.0f} W"
+        if self._ack_stage == 1:
+            _LOGGER.warning("Wattson commando-verificatie: %s — opnieuw sturen", omschrijving)
+            c.hass.bus.async_fire("logbook_entry", {
+                "name": "Wattson", "message": f"commando niet uitgevoerd ({omschrijving}) — opnieuw gestuurd",
+                "entity_id": "sensor.wattson_advies", "domain": "wattson_ems"})
+            reassert = getattr(c.adapter_impl, "reassert", None)
+            try:
+                if reassert is not None:
+                    await reassert(action, setpoint)
+                else:
+                    await c.adapter_impl.apply(action, setpoint, p1_cap=False)
+            except Exception:  # noqa: BLE001
+                _LOGGER.exception("Wattson commando-verificatie: opnieuw sturen faalde")
+            return
+        if self._ack_stage == 2:
+            c.hass.bus.async_fire("logbook_entry", {
+                "name": "Wattson", "message": f"commando nog steeds niet uitgevoerd ({omschrijving}) — accu-integratie herladen",
+                "entity_id": "sensor.wattson_advies", "domain": "wattson_ems"})
+            await self._reload_battery_integration(f"commando niet uitgevoerd ({omschrijving})")
+            return
+        # trap 3: veilig stoppen en melden
+        self.ack_error = f"accu voert commando niet uit: {omschrijving}"
+        _LOGGER.error("Wattson commando-verificatie: %s — veilig gestopt", omschrijving)
+        c.assist_active = None
+        await c.emergency_stop(None)
+        c.reden = "accu voert commando niet uit — veilig gestopt"
+        c.hass.bus.async_fire("logbook_entry", {
+            "name": "Wattson",
+            "message": f"accu voert commando niet uit ({omschrijving}) na opnieuw sturen en herladen — veilig gestopt, volgende poging over {CMD_ACK_BACKOFF_S // 60} min",
+            "entity_id": "sensor.wattson_advies", "domain": "wattson_ems"})
+        try:
+            await c.hass.services.async_call("persistent_notification", "create", {
+                "notification_id": "wattson_commando",
+                "title": "Wattson: accu reageert niet",
+                "message": (f"{omschrijving}. Opnieuw sturen en herladen hielpen niet; accu veilig gestopt. "
+                            "Check de Zendure-verbinding (zenSDK, 192.168.1.118) en of HA's HTTP-stack hangt "
+                            "(zie automation 'P1 - Auto-heal')."),
+            }, blocking=False)
+        except Exception:  # noqa: BLE001
+            _LOGGER.exception("Wattson commando-verificatie: melding faalde")
+        self._ack_muted_until = now + timedelta(seconds=CMD_ACK_BACKOFF_S)
+        self._ack_stage = 0
+        self._ack_cmd_at = None
+
     async def tick(self) -> None:
         """Lichte bewakingslus (elke WATCH_INTERVAL_S): watchdog + stale-guard.
 
@@ -239,5 +360,9 @@ class Safety:
         except Exception:  # noqa: BLE001 - bewaking mag nooit zelf crashen
             _LOGGER.exception("Wattson safety-tick faalde")
         await self.stale_guard()
+        try:
+            await self.command_guard()
+        except Exception:  # noqa: BLE001 - bewaking mag nooit zelf crashen
+            _LOGGER.exception("Wattson commando-verificatie faalde")
         if c.last_error != prev_err:
             c.write_entities()

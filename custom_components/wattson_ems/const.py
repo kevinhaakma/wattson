@@ -268,6 +268,15 @@ GEENDATA_RELOAD_S = 300    # eerder al: accu-integratie herladen (homeassistant.
                            # op de SoC-entity) — 05/06-09: zendure_ha verliest de cloud-MQTT en
                            # herstelt alleen door een entry-reload; max 1x per RELOAD_COOLDOWN_S
 GEENDATA_RELOAD_COOLDOWN_S = 900
+# Commando-verificatie (25-09-2026): 'laden 2000 W' stond 4,5 u op papier terwijl
+# de accu op 29 % bleef — het apparaat leefde (rssi/spanning), dus de stale-guard
+# zweeg, maar de Zendure-manager voerde het manual-setpoint niet uit (HA's
+# gedeelde HTTP-sessie hing). Na CMD_ACK_S zonder vers vermogen in de
+# gecommandeerde richting: opnieuw sturen -> integratie herladen -> veilig
+# stoppen + melding; daarna CMD_ACK_BACKOFF_S rust voor de volgende poging.
+CMD_ACK_S = 180            # per trap: zo lang wachten op vers vermogen
+CMD_ACK_MIN_W = 100        # pas verifiëren vanaf dit setpoint; 'uitgevoerd' = >= 50 W
+CMD_ACK_BACKOFF_S = 1800   # na een stop-op-trap-3 zo lang niet opnieuw escaleren
 WATCH_STOP_GRACE_S = 45    # na een eigen stopcommando loopt het apparaat door
                            # cloud-latentie nog even uit; binnen de grace is de
                            # zojuist gestopte richting geen runaway

@@ -303,5 +303,99 @@ class SafetyRegressions(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual([call[0] for call in c.adapter_impl.calls], ["laden"])
 
 
+class CommandVerification(unittest.IsolatedAsyncioTestCase):
+    """25-09-2026: 'laden 2000 W' 4,5 u op papier, accu bleef op 29 %. Het
+    apparaat leefde (rssi), dus de stale-guard zweeg; de watchdog kijkt alleen
+    naar de verkeerde richting. command_guard escaleert: opnieuw sturen ->
+    integratie herladen -> veilig stoppen + melding."""
+
+    def setUp(self):
+        H.CLOCK.t = 10_000.0
+
+    def coordinator(self):
+        c = H.make_coordinator(caps=H.CAPS_FIXED)
+        c.control_enabled = True
+        H.basis(c, soc_pct=25)
+        H.set_prices(c, 0.05, [0.40] * 6)
+        c.hass.calls = []
+        async def record(domain, service, data=None, **kw):
+            c.hass.calls.append((domain, service, data or {}))
+        c.hass.services.async_call = record
+        return c
+
+    async def charging(self, c):
+        await c._tick(None)
+        self.assertEqual(c.adapter_impl.calls[-1][0], "laden")
+        self.assertGreaterEqual(c._last_charge_w, H.SAF.CMD_ACK_MIN_W)
+
+    def advance(self, c, s, *, bat_chg_w):
+        H.CLOCK.t += s
+        # verse (net gerapporteerde) telemetrie in de laadrichting
+        H.set_state(c, "sensor.bat_chg", bat_chg_w)
+
+    async def test_executed_command_never_escalates(self):
+        c = self.coordinator()
+        await self.charging(c)
+        calls = list(c.adapter_impl.calls)
+        for _ in range(5):
+            self.advance(c, 200, bat_chg_w=c._last_charge_w)
+            await c.safety.command_guard()
+        self.assertEqual(c.adapter_impl.calls, calls)
+        self.assertEqual(c.safety._ack_stage, 0)
+        self.assertIsNone(c.last_error)
+
+    async def test_unexecuted_command_escalates_reassert_reload_stop(self):
+        c = self.coordinator()
+        await self.charging(c)
+        setpoint = round(c._last_charge_w)
+        # binnen CMD_ACK_S nog geen oordeel
+        self.advance(c, 60, bat_chg_w=0)
+        await c.safety.command_guard()
+        self.assertEqual(c.safety._ack_stage, 0)
+        # trap 1: opnieuw sturen (FakeAdapter heeft geen reassert -> apply zonder P1-cap)
+        self.advance(c, 150, bat_chg_w=0)
+        await c.safety.command_guard()
+        self.assertEqual(c.safety._ack_stage, 1)
+        self.assertEqual(c.adapter_impl.calls[-1], ("laden", setpoint, False))
+        self.assertIsNone(c.last_error)
+        # trap 2: accu-integratie herladen
+        self.advance(c, 200, bat_chg_w=0)
+        await c.safety.command_guard()
+        self.assertEqual(c.safety._ack_stage, 2)
+        self.assertIn(("homeassistant", "reload_config_entry", {"entity_id": c.ent_soc}), c.hass.calls)
+        # trap 3: veilig stoppen + persistente melding, daarna gedempt
+        self.advance(c, 200, bat_chg_w=0)
+        await c.safety.command_guard()
+        self.assertEqual(c.adapter_impl.calls[-1][0], "noodstop")
+        self.assertIn("voert commando niet uit", c.last_error)
+        self.assertTrue(any(d == "persistent_notification" for d, _, _ in c.hass.calls))
+        self.assertIsNotNone(c.safety._ack_muted_until)
+        # nieuw commando binnen de backoff: geen nieuwe escalatie
+        await c._tick(None)
+        calls = list(c.adapter_impl.calls)
+        self.advance(c, 200, bat_chg_w=0)
+        await c.safety.command_guard()
+        self.assertEqual(c.adapter_impl.calls, calls)
+
+    async def test_recovery_after_reassert_resets(self):
+        c = self.coordinator()
+        await self.charging(c)
+        self.advance(c, 200, bat_chg_w=0)
+        await c.safety.command_guard()
+        self.assertEqual(c.safety._ack_stage, 1)
+        self.advance(c, 30, bat_chg_w=c._last_charge_w)
+        await c.safety.command_guard()
+        self.assertEqual(c.safety._ack_stage, 0)
+        self.assertIsNone(c.safety.ack_error)
+
+    async def test_small_or_idle_setpoint_is_ignored(self):
+        c = self.coordinator()
+        c._last_action = "rust"
+        c._last_command_at = H._dt.utcnow()
+        self.advance(c, 400, bat_chg_w=0)
+        await c.safety.command_guard()
+        self.assertEqual(c.safety._ack_stage, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

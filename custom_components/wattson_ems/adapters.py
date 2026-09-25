@@ -263,6 +263,11 @@ class BatteryAdapter:
     async def enforce_rest(self) -> None:
         return None
 
+    async def reassert(self, action: str, power_w: float) -> None:
+        """Stuur het staande commando opnieuw, ook als de HA-state al 'goed'
+        staat (commando-verificatie: het apparaat voerde het niet uit)."""
+        await self.apply(action, power_w, p1_cap=False)
+
     def needs_refresh(self) -> bool:
         """Verloopt het laatste commando vanzelf op het apparaat?
 
@@ -374,6 +379,19 @@ class ZendureAdapter(BatteryAdapter):
             await set_power_number(self.c.hass, self.c.ent_zd_inlim, 0)
         if richting in (None, "ontladen"):
             await set_power_number(self.c.hass, self.c.ent_zd_outlim, 0)
+
+    async def reassert(self, action: str, power_w: float) -> None:
+        """Manager-select even naar 'off' en terug naar 'manual' met geforceerde
+        manual_power: de manager verwerkt het setpoint dan opnieuw en opent
+        zelf de richting (input-/outputLimit) die hij nodig heeft."""
+        c = self.c
+        if action not in ("laden", "ontladen", "verkopen"):
+            return
+        await c.hass.services.async_call(
+            "select", "select_option",
+            {"entity_id": c.ent_zd_operation, "option": "off"}, blocking=True)
+        signed = -abs(power_w) if action == "laden" else abs(power_w)
+        await self._set_mode("manual", signed)
 
     async def enforce_rest(self):
         """Meet verse activiteit terwijl rust gecommandeerd is -> limieten 0."""
