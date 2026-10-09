@@ -275,6 +275,11 @@ GEENDATA_RELOAD_COOLDOWN_S = 900
 # gecommandeerde richting: opnieuw sturen -> integratie herladen -> veilig
 # stoppen + melding; daarna CMD_ACK_BACKOFF_S rust voor de volgende poging.
 CMD_ACK_S = 180            # per trap: zo lang wachten op vers vermogen
+# Accuvermogen in de huislast-correctie (09-10-2026): vlak na een commando loopt
+# de telemetrie achter en geldt max(commando, meting); daarna is de meting leidend
+# zodra het apparaat leeft, en op de SoC-vloer/het plafond telt een commando niet.
+BAT_TELEMETRY_LAG_S = 120  # zo lang na een commando het commando nog meetellen
+SOC_EDGE_PCT = 1.0         # binnen dit % van min/max-SoC levert die richting niets
 CMD_ACK_MIN_W = 100        # pas verifiëren vanaf dit setpoint; 'uitgevoerd' = >= 50 W
 CMD_ACK_BACKOFF_S = 1800   # na een stop-op-trap-3 zo lang niet opnieuw escaleren
 WATCH_STOP_GRACE_S = 45    # na een eigen stopcommando loopt het apparaat door

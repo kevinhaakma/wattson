@@ -47,6 +47,9 @@ from . import adapters as A
 from . import planner as P
 from . import planning_service as PS
 from .const import (
+    BAT_TELEMETRY_LAG_S,
+    SOC_EDGE_PCT,
+    WATCH_FRESH_S,
     DOMAIN,
     CONF_ADAPTER,
     CONF_CAPACITY,
@@ -733,10 +736,10 @@ class WattsonCoordinator:
                     if b_dis is None:
                         b_dis = self.t.live_power_w(ent_dis, 180)
                     if b_chg is None:
-                        b_chg = self._last_charge_w if self._last_action == "laden" else 0.0
+                        b_chg = self.battery_flow_w()[0] if self._last_action == "laden" else 0.0
                     if b_dis is None:
                         fixed_dis = self._last_action == "verkopen" or not self.caps.p1_matching
-                        b_dis = self._last_discharge_w if fixed_dis else 0.0
+                        b_dis = self.battery_flow_w()[1] if fixed_dis else 0.0
                     b_chg_now = b_chg
                     b_dis_now = b_dis
                     # Nooit op één P1-sample plannen: de meter levert losse
@@ -1154,6 +1157,49 @@ class WattsonCoordinator:
             return None
         vals = list(self._soc_hist) + [cur]
         return statistics.median(vals)
+
+    def battery_flow_w(self) -> tuple[float, float]:
+        """(laad-, ontlaadvermogen) van de eigen accu zoals de huislast-
+        correctie het moet aannemen.
+
+        Vlak na een commando loopt de telemetrie 20-30 s achter: dan geldt het
+        ongunstigste geval max(commando, meting). Daarna is de meting leidend
+        zodra het apparaat aantoonbaar leeft, ook als de waarde al uren
+        constant is (Zendure schrijft alleen bij wijziging). Een accu op de
+        SoC-vloer (of het plafond) levert in die richting niets, wat het
+        commando ook zegt.
+
+        09-10: een ontlaadcommando van 2400 W bleef na het leeglopen (10 %,
+        gemeten 0 W sinds 08:07) als accuvermogen in de huislast staan. Het
+        huis 'vroeg' daardoor 2,6-3,7 kW, elk kwartier volgde 'duur kwartier
+        -> ontladen', en het geplande laden van 13-17 u kwam nooit door de
+        wisseldemping.
+        """
+        ent_chg, ent_dis = self.bat_flow_entities()
+        cmd_chg = max(self._last_charge_w, 0.0)
+        cmd_dis = max(self._last_discharge_w, 0.0)
+        soc = self.soc_pct()
+        if soc is not None:
+            if soc <= self._min_soc_pct + SOC_EDGE_PCT:
+                cmd_dis = 0.0
+            if soc >= self._max_soc_pct - SOC_EDGE_PCT:
+                cmd_chg = 0.0
+        settled = (self._last_command_at is None
+                   or (dt_util.utcnow() - self._last_command_at).total_seconds()
+                   > BAT_TELEMETRY_LAG_S)
+
+        def pick(cmd: float, ent: str) -> float:
+            measured = self.t.power_w(ent) if ent else None
+            if measured is None:
+                return cmd
+            if not cmd or not settled:
+                return max(cmd, measured, 0.0)
+            if (self.t.live_power_w(ent, WATCH_FRESH_S) is not None
+                    or self.t.device_alive(ent, WATCH_FRESH_S) is True):
+                return max(measured, 0.0)
+            return max(cmd, measured, 0.0)
+
+        return pick(cmd_chg, ent_chg), pick(cmd_dis, ent_dis)
 
     async def _realized_tick(self, _now) -> None:
         """Boekhouding: integreer gemeten accuvermogen x actuele prijs.

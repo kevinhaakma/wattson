@@ -863,6 +863,58 @@ def test_aflopend_commando_verversen():
     return run(scenario())
 
 
+def test_lege_accu_oud_ontlaadcommando():
+    """09-10: ontlaadcommando 2400 W bleef na het leeglopen als accuvermogen
+    in de huislast staan (meting 0 W, constant sinds uren) -> huis 'vroeg'
+    2,6-3,7 kW en het geplande laden kwam nooit door."""
+    c = make_coordinator()
+    vloer = c._min_soc_pct
+    oud = _dt.utcnow() - timedelta(hours=3)
+
+    def oude_opdracht():
+        c._last_action = "ontladen"
+        c._last_discharge_w = 2400.0
+        c._last_command_at = oud
+        set_state(c, "sensor.bat_dis", 0.0, age_s=3 * 3600)
+
+    # 1. op de SoC-vloer telt het commando niet, ook zonder device-register
+    basis(c, soc_pct=vloer, p1_w=1200.0)
+    oude_opdracht()
+    vloer_dis = c.battery_flow_w()[1]
+    vloer_bron = c.source.corrected(1200.0)
+
+    # 2. halfvolle accu, levend apparaat: de constante 0 W-meting is leidend
+    c2 = make_coordinator()
+    basis(c2, soc_pct=50.0, p1_w=1200.0)
+    c, c_vloer = c2, c
+    oude_opdracht()
+    c.t.device_alive = lambda ent, max_age_s: True
+    levend_dis = c.battery_flow_w()[1]
+
+    # 3. levendigheid niet vast te stellen: conservatief het commando houden
+    c.t.device_alive = lambda ent, max_age_s: None
+    onbekend_dis = c.battery_flow_w()[1]
+
+    # 4. vlak na een commando: ongunstigste geval max(commando, meting)
+    c.t.device_alive = lambda ent, max_age_s: True
+    c._last_command_at = _dt.utcnow()
+    vers_dis = c.battery_flow_w()[1]
+
+    # 5. plan-tick op de vloer: huislast = P1, niet P1 + 2400
+    c = c_vloer
+    set_prices(c, 0.19, [0.19, 0.20, 0.27, 0.28, 0.26, 0.15])
+    run(c._tick(None))
+    huislast = c.inputs.get("huislast_nu_w")
+    return {
+        "lege accu: oud ontlaadcommando telt niet als accuvermogen": vloer_dis == 0.0,
+        "lege accu: bronvraag = kale P1": vloer_bron == 1200.0,
+        "levend apparaat: constante meting 0 W is leidend": levend_dis == 0.0,
+        "onbekende levendigheid: commando blijft (conservatief)": onbekend_dis == 2400.0,
+        "vlak na commando: ongunstigste geval": vers_dis == 2400.0,
+        "plan-tick op de vloer: huislast niet opgeblazen": huislast is not None and huislast < 2000,
+    }
+
+
 def main():
     suites = [
         test_plan_basis, test_geen_data, test_verkopen_switch,
@@ -875,6 +927,7 @@ def main():
         test_assist_start_en_stopgrace, test_export_recovery, test_watchdog,
         test_typed_decision, test_command_arbitrage, test_tick_serialisatie,
         test_lifecycle_listeners, test_aflopend_commando_verversen,
+        test_lege_accu_oud_ontlaadcommando,
     ]
     failed = []
     total = 0

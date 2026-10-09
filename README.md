@@ -493,6 +493,12 @@ in an ineffective charge/discharge state.
   commands the battery to idle. The old instance rejects further commands,
   including results from calculations that were already running. Command
   permission is checked again after waiting for any preceding adapter write.
+- **Own battery flow in demand.** Household demand is P1 corrected for the
+  battery's own flow. Right after a command the worst case of command and
+  measurement counts (telemetry lags 20-30 s); after two minutes the measurement
+  of a live device wins, even when it has been constant for hours. At the SoC
+  floor (or ceiling) a discharge (or charge) command never counts as flow, so an
+  empty battery cannot inflate demand with its last discharge setpoint.
 - **Range clamping.** Values sent to number entities are clamped to their native
   minimum and maximum.
 

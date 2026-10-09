@@ -122,14 +122,12 @@ class SourcePower:
     def corrected(self, p1_w: float) -> float:
         """P1 met het effect van de eigen accu eruit gerekend.
 
-        Gebruikt hetzelfde ongunstigste-geval als de export-recovery: het
-        hoogste van commando en meting. Bij een accu in rust is dit gelijk
-        aan de kale meting.
+        Vlak na een commando het ongunstigste geval (hoogste van commando en
+        meting, zoals de export-recovery); daarna de meting van het levende
+        apparaat — zie coordinator.battery_flow_w. Bij een accu in rust is
+        dit gelijk aan de kale meting.
         """
-        c = self.c
-        ent_chg, ent_dis = c.bat_flow_entities()
-        dis = max(c._last_discharge_w, c.t.power_w(ent_dis) or 0.0, 0.0)
-        chg = max(c._last_charge_w, c.t.power_w(ent_chg) or 0.0, 0.0)
+        chg, dis = self.c.battery_flow_w()
         if dis > 0.0:
             return A.p1_without_battery(p1_w, discharge_w=dis)
         if chg > 0.0:
@@ -282,7 +280,7 @@ class TrackController:
             return None
         _, ent_dis = c.bat_flow_entities()
         dis = c.t.fresh_power_w(ent_dis)
-        dis_now = dis if dis is not None else c._last_discharge_w
+        dis_now = dis if dis is not None else c.battery_flow_w()[1]
         return max(A.p1_without_battery(p1, discharge_w=dis_now), 0.0)
 
     # ---------- snelle lus (event-gedreven op P1) ----------
