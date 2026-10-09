@@ -259,6 +259,12 @@ UPDATE_MINUTES = 10        # her-plan interval; realtime werk (bijspringen,
                            # de veiligheid draait apart op WATCH_INTERVAL_S
 WATCH_INTERVAL_S = 60      # eigen lichte bewakingslus (watchdog + stale-guard)
 DAGLICHT = (7, 21)         # uren waarbinnen de PV-bel wordt verdeeld
+# PV-nowcast (09-10-2026): wijkt de echte PV-meting nu sterk af van de forecast
+# voor dit uur (regen terwijl Forecast.Solar 600 W zegt), dan schaalt de rest van
+# vandaag mee met die verhouding, uitdempend naar de forecast met tijdconstante TAU.
+NOWCAST_MIN_FC_W = 150.0   # pas corrigeren als de forecast voor nu minstens dit is
+NOWCAST_TAU_H = 2.0        # na ~2 u telt de afwijking nog 37 %, na 4 u 14 %
+NOWCAST_RATIO = (0.1, 1.5) # grenzen op de verhouding meting/forecast
 
 # watchdog / robuustheid
 WATCH_FRESH_S = 180        # meetwaarde ouder dan dit telt niet als bewijs

@@ -915,6 +915,44 @@ def test_lege_accu_oud_ontlaadcommando():
     }
 
 
+def test_pv_nowcast():
+    """09-10: regen, meting 30 W tegen uur-forecast 620 W. De rest van vandaag
+    moet meeschalen (uitdempend), morgen niet; kleine forecasts niet."""
+    c = make_coordinator()
+    kwh = {"unit_of_measurement": "kWh"}
+    set_state(c, "sensor.pv_rest", 2.0, kwh)
+    set_state(c, "sensor.pv_morgen", 7.2, kwh)
+    set_state(c, "sensor.pv_uur", 0.62, kwh)
+    pv = F.PvCurve(c.t, "sensor.pv_now", "sensor.pv_rest", "sensor.pv_morgen",
+                   1.0, ent_hour_now="sensor.pv_uur")
+    local_now = _dt.now()
+    base = local_now.replace(hour=12, minute=0, second=0, microsecond=0)
+    hours = [_dt.as_utc(base + timedelta(hours=h)) for h in range(0, 6)]
+    hours.append(_dt.as_utc(base + timedelta(days=1)))  # morgen 12:00
+    dts = [1.0] * len(hours)
+
+    set_state(c, "sensor.pv_now", 620.0)          # meting = forecast: neutraal
+    ref = pv.curve(hours, dts)
+    set_state(c, "sensor.pv_now", 30.0)           # regen
+    nat = pv.curve(hours, dts)
+    k1 = nat[hours[1]] / ref[hours[1]]
+    k4 = nat[hours[4]] / ref[hours[4]]
+    verwacht1 = 1.0 + (0.1 - 1.0) * 2.718281828 ** (-1.0 / K.NOWCAST_TAU_H)
+
+    set_state(c, "sensor.pv_uur", 0.05, kwh)      # forecast nu < drempel
+    set_state(c, "sensor.pv_now", 10.0)
+    klein = pv.curve(hours, dts)
+    set_state(c, "sensor.pv_now", 50.0)
+    klein_ref = pv.curve(hours, dts)
+    return {
+        "nowcast: huidig slot = meting": nat[hours[0]] == 30.0,
+        "nowcast: +1 u geschaald met gedempte verhouding": abs(k1 - verwacht1) < 1e-6,
+        "nowcast: dempt uit naar forecast (+4 u minder gekort dan +1 u)": k1 < k4 < 1.0,
+        "nowcast: morgen ongemoeid": nat[hours[-1]] == ref[hours[-1]],
+        "nowcast: kleine forecast nu -> geen correctie": klein[hours[2]] == klein_ref[hours[2]],
+    }
+
+
 def main():
     suites = [
         test_plan_basis, test_geen_data, test_verkopen_switch,
@@ -927,7 +965,7 @@ def main():
         test_assist_start_en_stopgrace, test_export_recovery, test_watchdog,
         test_typed_decision, test_command_arbitrage, test_tick_serialisatie,
         test_lifecycle_listeners, test_aflopend_commando_verversen,
-        test_lege_accu_oud_ontlaadcommando,
+        test_lege_accu_oud_ontlaadcommando, test_pv_nowcast,
     ]
     failed = []
     total = 0

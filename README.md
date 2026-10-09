@@ -128,6 +128,13 @@ existing free capacity, and keeps an additional 0.75 kWh uncertainty buffer.
 Only the energy still expected not to fit in the battery becomes available for
 early discharge.
 
+**Nowcast.** When the measured PV output right now deviates from the forecast
+for the current hour (forecast at least 150 W), the rest of today's forecast is
+scaled by that ratio (clamped to 0.1–1.5), fading back to the plain forecast
+with a two-hour time constant. Tomorrow is never touched. This keeps a rainy
+afternoon from looking like an upcoming solar surplus, which otherwise made the
+planner keep postponing grid charging to 'sunny' quarters that never came.
+
 ## Battery adapters
 
 ### Zendure

@@ -7,7 +7,8 @@ Het profiel volgt zo vanzelf seizoenen en gedragsveranderingen (airco-zomers,
 stookwinters, nieuwe apparaten) zonder handmatige hertraining. De geleerde
 waarden overleven een herstart via een HA-Store (zie coordinator).
 PvCurve: verdeelt de dag-prognoses over een daglicht-bel; het huidige uur
-komt van de echte PV-meting (geen bias — dat is een meting, geen forecast).
+komt van de echte PV-meting (geen bias — dat is een meting, geen forecast),
+en de verhouding meting/forecast stuurt de rest van vandaag bij (nowcast).
 """
 from __future__ import annotations
 
@@ -16,7 +17,7 @@ from datetime import datetime, timedelta
 
 from homeassistant.util import dt as dt_util
 
-from .const import DAGLICHT
+from .const import DAGLICHT, NOWCAST_MIN_FC_W, NOWCAST_RATIO, NOWCAST_TAU_H
 from .telemetry import Telemetry
 
 
@@ -136,5 +137,19 @@ class PvCurve:
         # meting, dus zonder bias
         pv_now = self.t.power_w(self.ent_pv_now)
         if hours and pv_now is not None:
+            fc_now = out.get(hours[0], 0.0)
             out[hours[0]] = pv_now
+            # nowcast: de afwijking van nu zegt iets over de komende uren
+            # (09-10: regen, meting 30 W tegen forecast 620 W; de planner bleef
+            # laden een kwartier vooruitschuiven naar 'zonnige' kwartieren die
+            # nooit kwamen). Alleen vandaag; dempt uit naar de forecast.
+            if fc_now >= NOWCAST_MIN_FC_W:
+                lo, hi = NOWCAST_RATIO
+                ratio = min(max(pv_now / fc_now, lo), hi)
+                t0 = hours[0]
+                for dt in hours[1:]:
+                    if dt_util.as_local(dt).date() != today or dt not in out:
+                        continue
+                    lead_h = (dt - t0).total_seconds() / 3600.0
+                    out[dt] *= 1.0 + (ratio - 1.0) * math.exp(-lead_h / NOWCAST_TAU_H)
         return out
