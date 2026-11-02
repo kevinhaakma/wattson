@@ -286,6 +286,12 @@ CMD_ACK_S = 180            # per trap: zo lang wachten op vers vermogen
 # zodra het apparaat leeft, en op de SoC-vloer/het plafond telt een commando niet.
 BAT_TELEMETRY_LAG_S = 120  # zo lang na een commando het commando nog meetellen
 SOC_EDGE_PCT = 1.0         # binnen dit % van min/max-SoC levert die richting niets
+SOC_FLOOR_LEAD_H = 10 / 60 # ontladen nabij de vloer: hoogstens het vermogen dat de
+                           # resterende lading boven de vloer in deze tijd leegtrekt
+                           # (plan-tick 10 min + telemetrielag). 29-10-2026: 2000 W
+                           # verkopen bij 16 % liep in 3 kwartieren door tot 7,4 %;
+                           # de Zendure laadde zich daarna zelf op de piekprijs
+                           # (€0,69) terug naar 10 % en de watchdog greep in.
 CMD_ACK_MIN_W = 100        # pas verifiëren vanaf dit setpoint; 'uitgevoerd' = >= 50 W
 CMD_ACK_BACKOFF_S = 1800   # na een stop-op-trap-3 zo lang niet opnieuw escaleren
 WATCH_STOP_GRACE_S = 45    # na een eigen stopcommando loopt het apparaat door

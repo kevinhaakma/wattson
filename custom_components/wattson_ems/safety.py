@@ -12,6 +12,7 @@ from datetime import datetime, timedelta
 from homeassistant.util import dt as dt_util
 
 from .const import (
+    SOC_EDGE_PCT,
     CMD_ACK_BACKOFF_S,
     CMD_ACK_MIN_W,
     CMD_ACK_S,
@@ -123,6 +124,19 @@ class Safety:
             _LOGGER.debug(
                 "Wattson watchdog: %s genegeerd (startup-grace)", afwijking)
             return
+        if afwijking and richting == "laden":
+            soc = c.soc_pct()
+            if soc is not None and soc <= c._min_soc_pct + SOC_EDGE_PCT:
+                # BMS-zelfbescherming: op/onder de vloer laadt het apparaat
+                # zichzelf uit het net terug tot de vloer (29-10 18:15 bij
+                # 7,4 %, 02-11 01:45 op 10 %). Geen runaway; een echte
+                # runaway-lading tilt de SoC binnen een minuut boven de rand
+                # en wordt dan alsnog gezien. Niet ingrijpen: een dichte
+                # input-limiet vecht met de BMS.
+                _LOGGER.debug(
+                    "Wattson watchdog: %s genegeerd (SoC %.1f %% op de vloer: BMS-bijlading)",
+                    afwijking, soc)
+                return
         if afwijking and richting == self._stopped_richting and time.monotonic() < self._stop_grace_until:
             # uitloop van een zojuist zelf gestopte actie: het apparaat heeft
             # cloud-latentie en mag binnen de grace nog in die richting actief

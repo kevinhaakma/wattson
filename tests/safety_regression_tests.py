@@ -397,5 +397,82 @@ class CommandVerification(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(c.safety._ack_stage, 0)
 
 
+
+
+class FloorGuard(unittest.IsolatedAsyncioTestCase):
+    """29-10-2026 (na 18 u HA-uitval, piek €0,80): 'verkopen 2000 W' bij 16 %
+    liep in drie kwartieren door tot 7,4 %; de Zendure laadde zich daarna op
+    €0,69 zelf terug naar 10 % en de watchdog trok dat als runaway af.
+    02-11 01:45: zelfde BMS-bijlading op precies 10 % -> valse trip."""
+
+    def setUp(self):
+        H.CLOCK.t = 20_000.0
+
+    def coordinator(self, soc_pct):
+        c = H.make_coordinator(caps=H.CAPS_FIXED)
+        c.control_enabled = True
+        H.basis(c, soc_pct=soc_pct)
+        H.set_prices(c, 0.50, [0.40] * 6)
+        c.hass.calls = []
+        async def record(domain, service, data=None, **kw):
+            c.hass.calls.append((domain, service, data or {}))
+        c.hass.services.async_call = record
+        return c
+
+    async def discharge(self, c, watts):
+        command = c.command_arbiter.command(
+            H.CTRL.BatteryAction.SELL, watts, p1_cap=False,
+            source=H.CTRL.CommandSource.PLANNER)
+        return await c.command_arbiter.execute(
+            command, c._apply_command, allowed=c._command_allowed)
+
+    async def test_full_power_far_above_floor(self):
+        c = self.coordinator(soc_pct=40)
+        await self.discharge(c, 2000)
+        self.assertEqual(c.adapter_impl.calls[-1][:2], ("verkopen", 2000))
+
+    async def test_power_tapers_towards_floor(self):
+        c = self.coordinator(soc_pct=14)
+        floor = c._min_soc_pct
+        H.basis(c, soc_pct=floor + 4)
+        await self.discharge(c, 2000)
+        action, watts, _ = c.adapter_impl.calls[-1]
+        self.assertEqual(action, "verkopen")
+        # 4 % van 5,76 kWh = 0,23 kWh; in 10 min leeg = ~1,3 kW
+        self.assertLess(watts, 1500)
+        self.assertGreater(watts, 1000)
+        H.basis(c, soc_pct=floor + 0.5)
+        await self.discharge(c, 2000)
+        action, watts, _ = c.adapter_impl.calls[-1]
+        self.assertEqual(action, "verkopen")
+        self.assertLess(watts, 200)
+
+    async def test_at_floor_becomes_idle_without_ack_escalation(self):
+        c = self.coordinator(soc_pct=10)
+        H.basis(c, soc_pct=c._min_soc_pct)
+        result = await self.discharge(c, 2000)
+        self.assertEqual(c.adapter_impl.calls[-1][0], "rust")
+        self.assertEqual(result.applied_w, 0.0)
+        # realtime-volglus volgt dezelfde grens
+        await c.set_discharge_limit(1500)
+        self.assertEqual(c.adapter_impl.calls[-1], ("ontlaadlimiet", 0, False))
+
+    async def test_watchdog_ignores_bms_recharge_at_floor(self):
+        c = self.coordinator(soc_pct=10)
+        c.advies = "rust"
+        H.basis(c, soc_pct=c._min_soc_pct)
+        ent_chg, _ = c.bat_flow_entities()
+        H.set_state(c, ent_chg, 2400.0)
+        H.CLOCK.t += H.K.STARTUP_GRACE_S + 1
+        await c.safety.watchdog()
+        self.assertIsNone(c.safety.tripped)
+        self.assertNotIn("noodstop", [call[0] for call in c.adapter_impl.calls])
+        # boven de rand is laden zonder opdracht wél een runaway
+        H.basis(c, soc_pct=c._min_soc_pct + H.K.SOC_EDGE_PCT + 2)
+        H.set_state(c, ent_chg, 2400.0)
+        await c.safety.watchdog()
+        self.assertEqual(c.safety.tripped, "laden")
+
+
 if __name__ == "__main__":
     unittest.main()

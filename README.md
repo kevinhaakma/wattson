@@ -7,7 +7,7 @@
 **Explainable smart home battery control for Home Assistant**
 
 [![HACS Custom](https://img.shields.io/badge/HACS-Custom-1565C0.svg?style=for-the-badge)](https://github.com/hacs/integration)
-[![Version](https://img.shields.io/badge/version-3.5.2-00B4B0.svg?style=for-the-badge)](#)
+[![Version](https://img.shields.io/badge/version-3.5.9-00B4B0.svg?style=for-the-badge)](#)
 [![License](https://img.shields.io/badge/license-MIT-1565C0.svg?style=for-the-badge)](#)
 [![Maintained](https://img.shields.io/badge/maintained-yes-22C55E.svg?style=for-the-badge)](#)
 
