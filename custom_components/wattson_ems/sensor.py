@@ -109,7 +109,8 @@ class WattsonGerealiseerdSensor(SensorEntity):
     @property
     def native_value(self):
         r = self.coordinator.realized
-        return round(r["opbrengst"] - r["kosten"], 2)
+        return round(r["opbrengst"] - r["kosten"]
+                     + self.coordinator.realized_stock_eur(), 2)
 
     @property
     def extra_state_attributes(self):
@@ -119,6 +120,7 @@ class WattsonGerealiseerdSensor(SensorEntity):
         return {
             "vandaag_kosten": round(r["kosten"], 2),
             "vandaag_opbrengst": round(r["opbrengst"], 2),
+            "vandaag_voorraad": round(self.coordinator.realized_stock_eur(), 2),
             "vandaag_laad_kwh": round(r["laad_kwh"], 2),
             "vandaag_ontlaad_kwh": round(r["ontlaad_kwh"], 2),
             "gisteren": dagen[0] if dagen else None,

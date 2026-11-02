@@ -49,6 +49,7 @@ from . import planning_service as PS
 from .const import (
     BAT_TELEMETRY_LAG_S,
     SOC_EDGE_PCT,
+    SOC_FLOOR_LEAD_H,
     WATCH_FRESH_S,
     DOMAIN,
     CONF_ADAPTER,
@@ -240,7 +241,8 @@ class WattsonCoordinator:
         # gerealiseerde waarde: wat de accu vandaag echt kost en opbrengt
         self._realized_store: Store = Store(hass, 1, f"{DOMAIN}.realized")
         self.realized: dict = {"datum": None, "kosten": 0.0, "opbrengst": 0.0,
-                               "laad_kwh": 0.0, "ontlaad_kwh": 0.0, "dagen": []}
+                               "laad_kwh": 0.0, "ontlaad_kwh": 0.0,
+                               "soc_start_kwh": None, "dagen": []}
         self.realized_sensor = None
         self.ent_calibration = o(CONF_ENT_CALIBRATION) or ""
         self.pv = PvCurve(self.t, self.ent_pv_now, self.ent_pv_remain,
@@ -1201,6 +1203,25 @@ class WattsonCoordinator:
 
         return pick(cmd_chg, ent_chg), pick(cmd_dis, ent_dis)
 
+    def _soc_kwh_now(self) -> float | None:
+        pct = self.soc_pct()
+        return None if pct is None else pct / 100.0 * self.params.capacity_kwh
+
+    def realized_stock_eur(self) -> float:
+        """Voorraadmutatie (2026-10-15): lading die vandaag in de accu bijkwam
+        of eruit ging telt mee, gewaardeerd tegen de gemiddelde laadprijs van
+        vandaag (anders de actuele prijs) x ontlaadrendement. Zonder deze term
+        boekte een dag die laadt voor morgen een schijnverlies (7 okt: -0,85)."""
+        r = self.realized
+        start, now = r.get("soc_start_kwh"), self._soc_kwh_now()
+        if start is None or now is None:
+            return 0.0
+        if r["laad_kwh"] > 0.1:
+            p_ref = r["kosten"] / r["laad_kwh"]
+        else:
+            p_ref = self.t.current_price() or 0.0
+        return (now - start) * p_ref * self.params.eta_nom
+
     async def _realized_tick(self, _now) -> None:
         """Boekhouding: integreer gemeten accuvermogen x actuele prijs.
 
@@ -1212,16 +1233,22 @@ class WattsonCoordinator:
         today = dt_util.now().date().isoformat()
         if r["datum"] != today:
             if r["datum"] is not None and (r["laad_kwh"] + r["ontlaad_kwh"]) > 0.01:
+                voorraad = self.realized_stock_eur()
                 r["dagen"] = ([{
                     "datum": r["datum"],
-                    "netto": round(r["opbrengst"] - r["kosten"], 2),
+                    "netto": round(r["opbrengst"] - r["kosten"] + voorraad, 2),
                     "kosten": round(r["kosten"], 2),
                     "opbrengst": round(r["opbrengst"], 2),
+                    "voorraad": round(voorraad, 2),
                     "laad_kwh": round(r["laad_kwh"], 2),
                     "ontlaad_kwh": round(r["ontlaad_kwh"], 2),
                 }] + r["dagen"])[:14]
             r.update({"datum": today, "kosten": 0.0, "opbrengst": 0.0,
-                      "laad_kwh": 0.0, "ontlaad_kwh": 0.0})
+                      "laad_kwh": 0.0, "ontlaad_kwh": 0.0,
+                      "soc_start_kwh": self._soc_kwh_now()})
+        elif r.get("soc_start_kwh") is None:
+            # eerste tick na de update: nulpunt vanaf nu (geen terugwerkende kracht)
+            r["soc_start_kwh"] = self._soc_kwh_now()
         prijs = self.t.current_price()
         if prijs is not None:
             ent_chg, ent_dis = self.bat_flow_entities()
@@ -1319,11 +1346,36 @@ class WattsonCoordinator:
         return (self.control_enabled and not self._data_blocked
                 and not self.safety.telemetry_blocked and not self.safety.tripped)
 
+    def floor_capped_discharge_w(self, power_w: float) -> float:
+        """Ontlaadvermogen begrensd op wat de SoC-vloer toelaat.
+
+        De SoC-sensor loopt achter en de volgende plan-tick komt pas na
+        UPDATE_MINUTES; op vol vermogen zakt de accu intussen ~6 %. Boven
+        de vloer mag hoogstens het vermogen dat de resterende lading in
+        SOC_FLOOR_LEAD_H leegtrekt, zodat het ontladen uitdooft op de vloer
+        in plaats van er doorheen te schieten (29-10-2026: 16 % -> 7,4 %,
+        daarna BMS-bijlading op de piekprijs en een watchdog-trip).
+        """
+        soc = self.soc_pct()
+        if soc is None or power_w <= 0.0:
+            return power_w
+        headroom_kwh = max(soc - self._min_soc_pct, 0.0) / 100.0 * self.params.capacity_kwh
+        cap_w = headroom_kwh * self.params.eta_nom * 1000.0 / SOC_FLOOR_LEAD_H
+        if cap_w < self.caps.min_setpoint_w:
+            return 0.0
+        return min(power_w, cap_w)
+
     async def _apply_command(self, command: BatteryCommand) -> float:
         """Enige ongearbitreerde doorgang naar een merkadapter."""
+        power_w = command.power_w
+        if command.action.is_discharge:
+            power_w = self.floor_capped_discharge_w(power_w)
+            if power_w <= 0.0:
+                return await self.adapter_impl.apply(
+                    BatteryAction.IDLE.value, 0.0, p1_cap=False)
         return await self.adapter_impl.apply(
             command.action.value,
-            command.power_w,
+            power_w,
             p1_cap=command.p1_cap,
         )
 
@@ -1345,4 +1397,5 @@ class WattsonCoordinator:
         return None if result.skipped else result.applied_w
 
     async def _apply_limit_command(self, command: BatteryCommand) -> float:
-        return await self.adapter_impl.adjust_discharge_limit(command.power_w)
+        return await self.adapter_impl.adjust_discharge_limit(
+            self.floor_capped_discharge_w(command.power_w))
