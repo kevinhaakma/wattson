@@ -59,6 +59,10 @@ class FakeStore:
     async def async_save(self, data):
         self.data = data
 
+    def async_delay_save(self, data_func, delay=0):
+        self.delayed = getattr(self, "delayed", []) + [delay]
+        self.data = data_func()
+
 
 _storage.Store = FakeStore
 _event = _module("homeassistant.helpers.event")
@@ -1061,6 +1065,7 @@ def test_pv_uurforecast_eigen_uur():
 
 def _pv_coordinator():
     c = make_coordinator()
+    c._started_mono = CLOCK.t - 10_000.0   # opwarmtijd voorbij: leren mag
     c.ent_pv_now = "sensor.pv_now"
     c.pv = F.PvCurve(c.t, "sensor.pv_now", "sensor.pv_rest", "sensor.pv_morgen", 1.05,
                      ent_hour_now="sensor.pv_uur")
@@ -1185,6 +1190,137 @@ def test_ontlaadgrens_apparaat():
     }
 
 
+def _grid_coordinator(fuse_a=25.0, bat_phase=1):
+    hass = FakeHass()
+    options = {
+        K.CONF_ENT_PRICE: "sensor.prijs",
+        K.CONF_ENT_SOC: "sensor.soc",
+        K.CONF_ENT_P1: "sensor.p1",
+        K.CONF_ENT_P1_PHASES: ["sensor.l1", "sensor.l2", "sensor.l3"],
+        K.CONF_MAIN_FUSE_A: fuse_a,
+        K.CONF_BAT_PHASE: bat_phase,
+    }
+    c = C.WattsonCoordinator(hass, types.SimpleNamespace(options=options), C.load_params())
+    c.adapter_impl = FakeAdapter(c, CAPS_SURPLUS)
+    c.caps = CAPS_SURPLUS
+    c.load_profile = F.LoadProfile({})
+    return c
+
+
+def _fasen(c, l1, l2, l3):
+    for ent, w in (("sensor.l1", l1), ("sensor.l2", l2), ("sensor.l3", l3)):
+        set_state(c, ent, w, {"unit_of_measurement": "W"})
+
+
+def test_netbegrenzing():
+    """Hoofdzekering 3x25 A, accu op fase 1. 10-11 04:22: WP + accu 2 kW + auto
+    7 kW; fase 1 haalde 5196 W, fase 2 5817 W. Laden mag fase 1 hoogstens
+    tot 0,9 x 25 A x 230 V = 5175 W brengen."""
+    c = _grid_coordinator()
+    c._last_action = C.BatteryAction.CHARGE
+    c._last_charge_w = 2000.0
+    set_state(c, "sensor.bat_chg", 2000.0, {"unit_of_measurement": "W"})
+    _fasen(c, 4800.0, 5800.0, 1000.0)
+    ruim = c.grid_capped_charge_w(2000.0)
+    _fasen(c, 6000.0, 1000.0, 1000.0)          # auto start op fase 1
+    krap = c.grid_capped_charge_w(2000.0)
+    _fasen(c, 7500.0, 1000.0, 1000.0)
+    vol = c.grid_capped_charge_w(2000.0)
+    # fase onbekend: zwaarste fase telt
+    o = _grid_coordinator(bat_phase=0)
+    o._last_action = C.BatteryAction.CHARGE
+    o._last_charge_w = 2000.0
+    set_state(o, "sensor.bat_chg", 2000.0, {"unit_of_measurement": "W"})
+    _fasen(o, 3000.0, 6000.0, 1000.0)
+    onbekend = o.grid_capped_charge_w(2000.0)
+    # uit of zonder verse meting: niets begrenzen
+    u = _grid_coordinator(fuse_a=0.0)
+    _fasen(u, 9000.0, 9000.0, 9000.0)
+    uit = u.grid_capped_charge_w(2000.0)
+    s = _grid_coordinator()
+    set_state(s, "sensor.l1", 9000.0, {"unit_of_measurement": "W"}, age_s=600)
+    set_state(s, "sensor.l2", 0.0, {"unit_of_measurement": "W"})
+    set_state(s, "sensor.l3", 0.0, {"unit_of_measurement": "W"})
+    oud = s.grid_capped_charge_w(2000.0)
+    # via de commandopoort: de adapter krijgt het begrensde vermogen
+    c.control_enabled = True
+    _fasen(c, 6000.0, 1000.0, 1000.0)
+    cmd = c.command_arbiter.command(C.BatteryAction.CHARGE, 2000.0, p1_cap=False,
+                                    source=C.CommandSource.PLANNER)
+    run(c._apply_command(cmd))
+    gestuurd = c.adapter_impl.calls[-1]
+    _fasen(c, 7500.0, 1000.0, 1000.0)
+    run(c._apply_command(cmd))
+    gestopt = c.adapter_impl.calls[-1]
+    return {
+        "netbegrenzing: ruimte op de accufase -> ongemoeid (fase 2 telt niet)": ruim == 2000.0,
+        "netbegrenzing: auto op de accufase -> laden terug tot de grens": abs(krap - 1175.0) < 1e-6,
+        "netbegrenzing: fase al boven de grens -> laden stopt": vol == 0.0,
+        "netbegrenzing: fase onbekend -> zwaarste fase": abs(onbekend - 1175.0) < 1e-6,
+        "netbegrenzing: zekering 0 -> uit": uit == 2000.0,
+        "netbegrenzing: geen verse fasemeting -> niet begrenzen": oud == 2000.0,
+        "netbegrenzing: adapter krijgt het begrensde vermogen": gestuurd[:2] == ("laden", 1175),
+        "netbegrenzing: geen ruimte -> rust i.p.v. laden": gestopt[0] == "rust",
+        "netbegrenzing: zichtbaar als attribuut": c.grid_cap_w == 0,
+    }
+
+
+def test_realized_opslag():
+    """wattson_ems.realized stond van 08-11 20:14 tot de herstart van 10-11
+    stil: _realized_tick riep elke minuut async_delay_save(.., 300) aan en
+    elke aanroep zette de timer opnieuw. Nu eens per 5 minuten, direct."""
+    c = make_coordinator()
+    basis(c, soc_pct=50.0)
+    set_prices(c, 0.30, [0.30] * 3)
+    for _ in range(10):                       # 9 minuten, elke minuut een tick
+        run(c._realized_tick(None))
+        CLOCK.t += 60.0
+    delays = getattr(c._realized_store, "delayed", [])
+    return {
+        "realized: binnen 10 minuten twee keer weggeschreven": len(delays) == 2,
+        "realized: zonder uitsteltimer (direct)": all(d <= 1 for d in delays),
+    }
+
+
+def test_opstart_niet_leren():
+    """Eerste tick na de herstart van 10-11 09:42 zag 0 W huislast; de tick
+    erna 262 W. De eerste 5 minuten na een start wordt niets geleerd."""
+    c = make_coordinator()
+    basis(c, soc_pct=50.0, p1_w=400.0)
+    set_prices(c, 0.30, [0.30] * 6)
+    run(c._tick(None))
+    direct = list(c._load_samples)
+    CLOCK.t += K.LOAD_WARMUP_S + 1.0
+    basis(c, soc_pct=50.0, p1_w=400.0)
+    set_prices(c, 0.30, [0.30] * 6)
+    run(c._tick(None))
+    later = list(c._load_samples)
+    return {
+        "opstart: eerste tick leert niets": direct == [],
+        "opstart: na de opwarmtijd wel": len(later) == 1,
+    }
+
+
+def test_exportprijs_realtime():
+    """Na saldering rekende het plan met prijs - (prijs excl. belasting), de
+    realtime-laag met de vaste optie 0,10. Beide lezen nu dezelfde prijs."""
+    c = make_coordinator()
+    nu = _dt.utcnow()
+    kwartier = nu.replace(minute=nu.minute // 15 * 15, second=0, microsecond=0)
+    fc = [{"start_date": (kwartier + timedelta(minutes=15 * q)).isoformat(),
+           "price_tax_included": {"amount": 0.30e7},
+           "price_tax_excluded": {"amount": (0.13 + 0.01 * q) * 1e7}} for q in range(-1, 3)]
+    set_state(c, c.ent_price, 0.30, {"forecast": fc})
+    CLOCK.t += 1.0                            # binnen het lopende kwartier
+    excl = c.t.current_price_excl_tax()
+    SC = importlib.import_module("wattson_ems.scenario")
+    na = c.scenario.export_price(0.30, SC.SALDERING_EINDE, excl)
+    return {
+        "exportprijs: excl. belasting van het lopende kwartier": excl is not None and abs(excl - 0.13) < 1e-9,
+        "exportprijs: na saldering = prijs excl. belasting": abs(na - 0.13) < 1e-9,
+    }
+
+
 def main():
     suites = [
         test_plan_basis, test_geen_data, test_verkopen_switch,
@@ -1200,6 +1336,8 @@ def main():
         test_lege_accu_oud_ontlaadcommando, test_pv_nowcast,
         test_pv_daglichtvenster, test_pv_uurforecast_eigen_uur,
         test_pv_terugval_zonder_meting, test_ontlaadgrens_apparaat,
+        test_netbegrenzing, test_realized_opslag, test_opstart_niet_leren,
+        test_exportprijs_realtime,
     ]
     failed = []
     total = 0

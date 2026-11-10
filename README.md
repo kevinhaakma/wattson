@@ -7,7 +7,7 @@
 **Explainable smart home battery control for Home Assistant**
 
 [![HACS Custom](https://img.shields.io/badge/HACS-Custom-1565C0.svg?style=for-the-badge)](https://github.com/hacs/integration)
-[![Version](https://img.shields.io/badge/version-3.5.9-00B4B0.svg?style=for-the-badge)](#)
+[![Version](https://img.shields.io/badge/version-3.5.13-00B4B0.svg?style=for-the-badge)](#)
 [![License](https://img.shields.io/badge/license-MIT-1565C0.svg?style=for-the-badge)](#)
 [![Maintained](https://img.shields.io/badge/maintained-yes-22C55E.svg?style=for-the-badge)](#)
 
@@ -178,6 +178,13 @@ reads `select.<device>_fuse_group` (derived from the configured
 effective ceiling is published as `ontlaad_max_w` on the advice sensor. If the
 select entity has been renamed, set the maximum discharge power option to the
 fuse-group value yourself.
+
+Grid limit: with three per-phase P1 power sensors, the main fuse rating per
+phase and the phase the battery is connected to (options `ent_p1_fasen`,
+`hoofdzekering_a`, `accu_fase`), Wattson never charges so hard that the
+battery phase exceeds 90 % of the fuse. When an EV or heat pump starts on that
+phase while charging, the charge power drops immediately; the active cap is
+published as `netbegrenzing_w`. Fuse 0 disables the limit.
 
 Low manual setpoints also require the Zendure manager to wake one idle device
 at its official 50 W start threshold. The compatibility patch used by the

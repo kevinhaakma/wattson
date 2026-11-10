@@ -65,7 +65,10 @@
           "p_discharge_max_w": "Maximum discharge power (W)",
           "wedge_post_saldering": "Export price discount after net-metering ends (EUR/kWh, from 2027)",
           "ent_import_totalen": "Grid import total counters (yearly netting guard, optional)",
-          "ent_export_totalen": "Grid export total counters (yearly netting guard, optional)"
+          "ent_export_totalen": "Grid export total counters (yearly netting guard, optional)",
+          "ent_p1_fasen": "P1 power per phase (W, three sensors, optional)",
+          "hoofdzekering_a": "Main fuse per phase (A, 0 = no grid limit)",
+          "accu_fase": "Phase the battery is connected to (1-3, 0 = unknown)"
         }
       }
     },
@@ -128,7 +131,10 @@
           "ent_ms_rs485": "Marstek RS485 control mode switch (optional, register 42000)",
           "ms_device_id": "Marstek battery (device of the Local API integration)",
           "ms_service": "Marstek Local API integration (auto = detect set_passive_mode)",
-          "ent_ms_soc_target": "Marstek charge/discharge-to-SoC number (optional, register 42011)"
+          "ent_ms_soc_target": "Marstek charge/discharge-to-SoC number (optional, register 42011)",
+          "ent_p1_fasen": "P1 power per phase (W, three sensors, optional)",
+          "hoofdzekering_a": "Main fuse per phase (A, 0 = no grid limit)",
+          "accu_fase": "Phase the battery is connected to (1-3, 0 = unknown)"
         }
       }
     },

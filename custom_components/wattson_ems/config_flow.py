@@ -63,6 +63,9 @@ from .const import (
     CONF_P_CHARGE,
     CONF_P_DISCHARGE,
     CONF_WEDGE_POST,
+    CONF_ENT_P1_PHASES,
+    CONF_MAIN_FUSE_A,
+    CONF_BAT_PHASE,
     DEFAULT_OPTIONS,
     DOMAIN,
 )
@@ -196,6 +199,15 @@ def _battery_schema(options: dict) -> vol.Schema:
                      default=list(_value(options, CONF_ENT_EXPORT_TOTALS) or [])):
             selector.EntitySelector(selector.EntitySelectorConfig(
                 domain="sensor", multiple=True)),
+        # netbegrenzing: per-fase-vermogen P1, hoofdzekering (A, 0 = uit) en
+        # de fase van de accu (0 = onbekend, dan de zwaarste fase)
+        vol.Optional(CONF_ENT_P1_PHASES,
+                     default=list(_value(options, CONF_ENT_P1_PHASES) or [])):
+            selector.EntitySelector(selector.EntitySelectorConfig(
+                domain="sensor", multiple=True)),
+        vol.Optional(CONF_MAIN_FUSE_A, default=_value(options, CONF_MAIN_FUSE_A)): vol.Coerce(float),
+        vol.Optional(CONF_BAT_PHASE, default=_value(options, CONF_BAT_PHASE)):
+            vol.All(vol.Coerce(int), vol.Range(min=0, max=3)),
     })
 
 

@@ -666,6 +666,15 @@ class ChargeController:
         p1 = c.t.fresh_power_w(c.ent_p1, 60)
         if p1 is None:
             return
+        # netbegrenzing: springt de last op de accufase (auto, warmtepomp)
+        # tijdens laden, dan direct terug — de lus zelf ziet alleen de
+        # totale P1 en zou het laadvermogen laten staan
+        if c._last_action == BatteryAction.CHARGE and c._last_charge_w > 0:
+            cap = c.grid_capped_charge_w(c._last_charge_w)
+            if cap < c._last_charge_w - DIS_LOOP_DEADBAND_W:
+                self._pending = True
+                c.hass.async_create_task(self._apply(cap))
+                return
         self.loop.observe(time.monotonic(), p1)
         doel = self.loop.decide(c.params.p_charge_max_w, self.plan_floor_w())
         if doel is None:
@@ -742,7 +751,8 @@ class ExportRecovery:
             prijs = c.t.current_price()
             if soc_pct is not None and prijs is not None:
                 soc = soc_pct / 100.0 * c.params.capacity_kwh
-                exportprijs = c.scenario.export_price(prijs, dt_util.now().date())
+                exportprijs = c.scenario.export_price(
+                    prijs, dt_util.now().date(), c.t.current_price_excl_tax())
                 if (exportprijs - c.params.beta
                         > c.values.discharge_floor(soc) + ASSIST_MARGIN_EUR):
                     self.since = None
@@ -791,7 +801,8 @@ class ExportRecovery:
             if soc is not None and prijs is not None:
                 # zelfde afweging als het plan: opslaan loont als de
                 # misgelopen export onder het laadplafond (λ) blijft
-                exportprijs = c.scenario.export_price(prijs, dt_util.now().date())
+                exportprijs = c.scenario.export_price(
+                    prijs, dt_util.now().date(), c.t.current_price_excl_tax())
                 charge_economic = (exportprijs - c.params.beta
                                    < c.values.charge_ceiling(soc) - ASSIST_MARGIN_EUR)
 
@@ -921,7 +932,8 @@ class AssistController:
         # verdringen is prijs + alpha waard; overschot opslaan kost de
         # misgelopen export (exportprijs - beta). λ levert per actuele SoC
         # de grens — de kleine marge is hysterese tegen randgeflipper.
-        exportprijs = c.scenario.export_price(prijs, dt_util.now().date())
+        exportprijs = c.scenario.export_price(
+            prijs, dt_util.now().date(), c.t.current_price_excl_tax())
         dek_waarde = prijs + c.params.alpha
         floor = v.discharge_floor(soc)
         ceil = v.charge_ceiling(soc)

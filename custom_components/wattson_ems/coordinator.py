@@ -96,6 +96,13 @@ from .const import (
     CONF_P_CHARGE,
     CONF_P_DISCHARGE,
     CONF_WEDGE_POST,
+    CONF_ENT_P1_PHASES,
+    CONF_MAIN_FUSE_A,
+    CONF_BAT_PHASE,
+    FUSE_MARGIN,
+    PHASE_VOLTAGE_V,
+    LOAD_WARMUP_S,
+    REALIZED_SAVE_S,
     DEFAULT_OPTIONS,
     DWELL_OVERRIDE_EUR,
     EV_HOUSE_MIN_W,
@@ -183,6 +190,17 @@ class WattsonCoordinator:
         self.ms_service = o(CONF_MS_SERVICE)
         self.ent_bat_chg = o(CONF_ENT_BAT_CHG)
         self.ent_bat_dis = o(CONF_ENT_BAT_DIS)
+        # netbegrenzing (hoofdzekering per fase)
+        self.ent_p1_phases = [e for e in (o(CONF_ENT_P1_PHASES) or []) if e]
+        try:
+            self.main_fuse_a = float(o(CONF_MAIN_FUSE_A) or 0.0)
+            self.bat_phase = int(o(CONF_BAT_PHASE) or 0)
+        except (TypeError, ValueError):
+            self.main_fuse_a, self.bat_phase = 0.0, 0
+        self.grid_cap_w: float | None = None   # laatst toegepaste fasegrens (attribuut)
+        # lastprofiel: pas leren als SourcePower na een start is ingelopen
+        self._started_mono = time.monotonic()
+        self._realized_saved_mono = 0.0
 
         # adapter-implementatie + capabilities; alle merk-specifieke kennis
         # leeft in adapters.py — de coordinator stuurt op self.caps
@@ -797,7 +815,12 @@ class WattsonCoordinator:
                     # metingen, niet terwijl de EV-telemetrie blind is (dan
                     # zit er autovermogen in de last) en niet zonder bekende
                     # PV-opbrengst.
+                    # Niet in de eerste LOAD_WARMUP_S na een start: de
+                    # eerste tick na de herstart van 10-11 09:42 zag 0 W
+                    # huislast (P1 4 W, PV 273 W) en de tick erna 262 W;
+                    # oorzaak niet vastgesteld, dus die tick niet leren.
                     if (not ev_blind and pv_bekend
+                            and time.monotonic() - self._started_mono >= LOAD_WARMUP_S
                             and self.t.fresh_power_w(self.ent_p1, 180)
                             is not None):
                         self._note_load_sample(dt_util.utcnow(), load)
@@ -855,6 +878,7 @@ class WattsonCoordinator:
             "accu_laden_w": round(context.battery_charge_w),
             "accu_ontladen_w": round(context.battery_discharge_w),
             "ontlaad_max_w": round(self.params.p_discharge_max_w),
+            "netbegrenzing_w": self.grid_cap_w,
             "pv_rest_vandaag_kwh": round(self.pv.remain_kwh(), 1),
             "pv_morgen_kwh": round(self.pv.tomorrow_kwh(), 1),
             "ev_laadt": context.ev_now,
@@ -1363,7 +1387,15 @@ class WattsonCoordinator:
                 kwh = dis / 60000.0
                 r["ontlaad_kwh"] += kwh
                 r["opbrengst"] += kwh * prijs
-        self._realized_store.async_delay_save(lambda: dict(self.realized), 300)
+        # Niet elke minuut async_delay_save(.., 300): elke aanroep zet de
+        # timer opnieuw, dus hij liep nooit af en de boekhouding werd alleen
+        # bij afsluiten weggeschreven (wattson_ems.realized stond van 08-11
+        # 20:14 tot de herstart van 10-11 09:42 stil). Nu eens per
+        # REALIZED_SAVE_S, direct.
+        now_m = time.monotonic()
+        if now_m - self._realized_saved_mono >= REALIZED_SAVE_S:
+            self._realized_saved_mono = now_m
+            self._realized_store.async_delay_save(lambda: dict(self.realized), 1)
         if self.realized_sensor is not None:
             self.realized_sensor.async_write_ha_state()
 
@@ -1495,9 +1527,62 @@ class WattsonCoordinator:
             return 0.0
         return min(power_w, cap_w)
 
+    def _phase_powers_w(self) -> list[float] | None:
+        """Actueel vermogen per fase (W, + = import), of None zonder verse meting."""
+        if not self.ent_p1_phases:
+            return None
+        out = []
+        for ent in self.ent_p1_phases:
+            p = self.t.fresh_power_w(ent, 60)
+            if p is None:
+                return None
+            out.append(p)
+        return out
+
+    def grid_capped_charge_w(self, power_w: float) -> float:
+        """Laadvermogen begrensd op de hoofdzekering.
+
+        Hoofdzekering 3x25 A; 10-11-2026 04:22 stapelden warmtepomp, accu
+        (2 kW) en auto (7 kW) tot 12,66 kW en fase 1 (de accufase) haalde
+        5196 W, fase 2 5817 W (25,3 A). Laden mag de accufase hoogstens tot
+        FUSE_MARGIN x zekering brengen. Fase onbekend: de zwaarst belaste
+        fase telt (conservatief). Geen verse fasemeting: niet begrenzen —
+        dit is een netbeschermingsgrens, geen veiligheidsstop.
+        """
+        self.grid_cap_w = None
+        if self.main_fuse_a <= 0.0 or power_w <= 0.0:
+            return power_w
+        phases = self._phase_powers_w()
+        if phases is None:
+            return power_w
+        limit_w = self.main_fuse_a * PHASE_VOLTAGE_V * FUSE_MARGIN
+        if 1 <= self.bat_phase <= len(phases):
+            load_w = phases[self.bat_phase - 1]
+        else:
+            load_w = max(phases)
+        # het eigen laadvermogen zit al in die fase; dat mag blijven
+        own = 0.0
+        if self._last_action in (BatteryAction.CHARGE, BatteryAction.SURPLUS_CHARGE):
+            measured = self.t.live_power_w(self.bat_flow_entities()[0], 180)
+            own = measured if measured is not None else self._last_charge_w
+        cap = max(own + (limit_w - load_w), 0.0)
+        if cap >= power_w:
+            return power_w
+        self.grid_cap_w = round(cap)
+        return 0.0 if cap < self.caps.min_setpoint_w else cap
+
     async def _apply_command(self, command: BatteryCommand) -> float:
         """Enige ongearbitreerde doorgang naar een merkadapter."""
         power_w = command.power_w
+        if command.action is BatteryAction.CHARGE:
+            capped = self.grid_capped_charge_w(power_w)
+            if capped < power_w:
+                _LOGGER.debug("Wattson netbegrenzing: laden %.0f -> %.0f W (fasegrens)",
+                              power_w, capped)
+                if capped <= 0.0:
+                    return await self.adapter_impl.apply(
+                        BatteryAction.IDLE.value, 0.0, p1_cap=False)
+                power_w = capped
         if command.action.is_discharge:
             power_w = self.floor_capped_discharge_w(power_w)
             if power_w <= 0.0:

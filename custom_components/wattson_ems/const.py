@@ -108,6 +108,19 @@ CONF_ENT_EXPORT_TOTALS = "ent_export_totalen"
 # Onder saldering komt de wedge uit params.json (getraind, ~0,02).
 CONF_WEDGE_POST = "wedge_post_saldering"
 
+# netbegrenzing: laden nooit zo hard dat een fase boven de hoofdzekering
+# komt. Per-fase-vermogen van de P1-meter (W, +import), de zekering in A per
+# fase en de fase waarop de accu zit (0 = onbekend: dan geldt de zwaarst
+# belaste fase, conservatief). Zekering 0 = begrenzing uit.
+CONF_ENT_P1_PHASES = "ent_p1_fasen"
+CONF_MAIN_FUSE_A = "hoofdzekering_a"
+CONF_BAT_PHASE = "accu_fase"
+PHASE_VOLTAGE_V = 230.0
+FUSE_MARGIN = 0.9          # 25 A -> 5175 W per fase toegestaan
+
+LOAD_WARMUP_S = 300        # na een start zoveel s geen lastmetingen leren
+REALIZED_SAVE_S = 300      # boekhouding hoogstens zo vaak wegschrijven
+
 # ---------- defaults ----------
 # Accu-defaults komen uit het battery-blok van params.json: dat blok wordt
 # door de trainer geëxporteerd en is de enige bron van waarheid voor de
@@ -177,6 +190,9 @@ DEFAULT_OPTIONS = {
     CONF_WEDGE_POST: 0.10,
     CONF_ENT_IMPORT_TOTALS: [],
     CONF_ENT_EXPORT_TOTALS: [],
+    CONF_ENT_P1_PHASES: [],
+    CONF_MAIN_FUSE_A: 0.0,
+    CONF_BAT_PHASE: 0,
 }
 
 EV_THRESHOLD_KW = 0.5      # daarboven telt als "auto laadt"

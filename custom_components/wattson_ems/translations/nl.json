@@ -65,7 +65,10 @@
           "p_discharge_max_w": "Maximaal ontlaadvermogen (W)",
           "wedge_post_saldering": "Exportprijs-korting na einde saldering (EUR/kWh, vanaf 2027)",
           "ent_import_totalen": "Totaaltellers import (jaarsaldering-bewaking, optioneel)",
-          "ent_export_totalen": "Totaaltellers export (jaarsaldering-bewaking, optioneel)"
+          "ent_export_totalen": "Totaaltellers export (jaarsaldering-bewaking, optioneel)",
+          "ent_p1_fasen": "P1-vermogen per fase (W, drie sensoren, optioneel)",
+          "hoofdzekering_a": "Hoofdzekering per fase (A, 0 = geen netbegrenzing)",
+          "accu_fase": "Fase waarop de accu zit (1-3, 0 = onbekend)"
         }
       }
     },
@@ -128,7 +131,10 @@
           "ent_ms_rs485": "Marstek RS485-control-mode-switch (optioneel, register 42000)",
           "ms_device_id": "Marstek-accu (apparaat van de Local-API-integratie)",
           "ms_service": "Marstek Local-API-integratie (auto = set_passive_mode detecteren)",
-          "ent_ms_soc_target": "Marstek charge/discharge-to-SoC-number (optioneel, register 42011)"
+          "ent_ms_soc_target": "Marstek charge/discharge-to-SoC-number (optioneel, register 42011)",
+          "ent_p1_fasen": "P1-vermogen per fase (W, drie sensoren, optioneel)",
+          "hoofdzekering_a": "Hoofdzekering per fase (A, 0 = geen netbegrenzing)",
+          "accu_fase": "Fase waarop de accu zit (1-3, 0 = onbekend)"
         }
       }
     },

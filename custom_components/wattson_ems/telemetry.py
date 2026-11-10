@@ -164,6 +164,15 @@ class Telemetry:
             out.insert(0, (start, cur))
         return out
 
+    def current_price_excl_tax(self) -> float | None:
+        """Prijs excl. belasting van het lopende slot, of None."""
+        m = self.price_excl_tax_map()
+        if not m:
+            return None
+        now = dt_util.utcnow()
+        past = [dt for dt in m if dt <= now]
+        return m[max(past)] if past else None
+
     def price_excl_tax_map(self) -> dict[datetime, float]:
         """Optionele prijs excl. belasting per slot (Zonneplan uur/kwartier) voor post-saldering."""
         st = self.hass.states.get(self.ent_price)
