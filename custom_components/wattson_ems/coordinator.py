@@ -759,12 +759,39 @@ class WattsonCoordinator:
                     bron = (p1_typ if p1_typ is not None
                             else A.p1_without_battery(
                                 p1, charge_w=b_chg, discharge_w=b_dis))
-                    load = max(bron - wb_w + (pv.get(dt, 0.0)), 0.0)
+                    # P1 heeft de PV al verrekend; de huislast is dus netto +
+                    # GEMETEN opbrengst. Zonder meting telde hier de
+                    # forecast-PV mee: na zonsondergang (omvormer
+                    # unavailable) een verouderde uurwaarde van 2202 W,
+                    # waardoor slot 17|0 2022 W leerde bij 1052 W gemeten
+                    # (02..09-11-2026).
+                    netto = bron - wb_w
+                    pv_meting = (self.t.power_w(self.ent_pv_now)
+                                 if self.ent_pv_now else None)
+                    pv_bekend = True
+                    if not self.ent_pv_now:
+                        # geen PV-sensor geconfigureerd: de forecast is de
+                        # enige bron
+                        pv0 = pv.get(dt, 0.0)
+                    elif pv_meting is not None:
+                        pv0 = pv_meting
+                    elif self.pv.is_dark(dt_util.now()):
+                        # zon onder: de omvormer slaapt, geen meting = 0 W
+                        pv0 = 0.0
+                    else:
+                        # meting weg bij daglicht: de opbrengst is onbekend.
+                        # Alleen het netto is zeker — dat blijft kloppen in
+                        # de stap, maar het is geen lastwaarneming.
+                        pv0 = max(-netto, 0.0)
+                        pv_bekend = False
+                    load = max(netto + pv0, 0.0)
+                    pv[dt] = pv0
                     # adaptief profiel: dit is een échte waarneming van de
                     # EV/accu-gecorrigeerde huislast. Alleen leren van verse
-                    # metingen, en niet terwijl de EV-telemetrie blind is
-                    # (dan zit er autovermogen in de last).
-                    if (not ev_blind
+                    # metingen, niet terwijl de EV-telemetrie blind is (dan
+                    # zit er autovermogen in de last) en niet zonder bekende
+                    # PV-opbrengst.
+                    if (not ev_blind and pv_bekend
                             and self.t.fresh_power_w(self.ent_p1, 180)
                             is not None):
                         self._note_load_sample(dt_util.utcnow(), load)

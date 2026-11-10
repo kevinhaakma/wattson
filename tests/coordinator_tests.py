@@ -915,9 +915,19 @@ def test_lege_accu_oud_ontlaadcommando():
     }
 
 
+def _klok(hour, minute=0):
+    """Zet de testklok vooruit naar het eerstvolgende hh:mm (klok loopt nooit terug)."""
+    day = 86400.0
+    target = (CLOCK.t // day) * day + hour * 3600.0 + minute * 60.0
+    while target <= CLOCK.t:
+        target += day
+    CLOCK.t = target
+
+
 def test_pv_nowcast():
     """09-10: regen, meting 30 W tegen uur-forecast 620 W. De rest van vandaag
     moet meeschalen (uitdempend), morgen niet; kleine forecasts niet."""
+    _klok(12, 20)   # de uur-forecast geldt voor het klokuur waarin hij is geschreven
     c = make_coordinator()
     kwh = {"unit_of_measurement": "kWh"}
     set_state(c, "sensor.pv_rest", 2.0, kwh)
@@ -1010,6 +1020,119 @@ def test_pv_daglichtvenster():
     }
 
 
+def test_pv_uurforecast_eigen_uur():
+    """05-11 17:03-17:33: 'dit uur' stond nog op de waarde van 16 u (2,097 kWh,
+    geschreven 16:33) en werd op alle kwartieren van 17 u gezet. Een
+    uur-forecast geldt alleen voor het klokuur waarin hij is geschreven."""
+    _klok(16, 33)
+    c = make_coordinator()
+    kwh = {"unit_of_measurement": "kWh"}
+    set_state(c, "sensor.pv_rest", 0.5, kwh)
+    set_state(c, "sensor.pv_morgen", 3.6, kwh)
+    set_state(c, "sensor.pv_uur", 2.097, kwh)        # geschreven 16:33, geldt voor 16 u
+    set_state(c, "sensor.pv_uur_volgend", 0.0, kwh)  # geschreven 16:33, geldt voor 17 u
+    _klok(17, 10)
+    base = _dt.now().replace(minute=0, second=0, microsecond=0)
+    hours = [_dt.as_utc(base + timedelta(minutes=15 * q)) for q in range(0, 12)]
+    dts = [0.25] * len(hours)
+    alleen_nu = F.PvCurve(c.t, "", "sensor.pv_rest", "sensor.pv_morgen", 1.05,
+                          ent_hour_now="sensor.pv_uur")
+    beide = F.PvCurve(c.t, "", "sensor.pv_rest", "sensor.pv_morgen", 1.05,
+                      ent_hour_now="sensor.pv_uur", ent_hour_next="sensor.pv_uur_volgend")
+    try:
+        _fake_sun((7, 50), (16, 48))
+        oud_uur = alleen_nu.curve(hours, dts)
+        verschoven = beide.curve(hours, dts)
+    finally:
+        _no_sun()
+    set_state(c, "sensor.pv_uur", 0.4, kwh)          # ververst om 17:10: geldt nu voor 17 u
+    vers = beide.curve(hours, dts)
+    return {
+        "uur-forecast: waarde van het vorige uur telt niet voor dit uur":
+            all(oud_uur[dt] == 0.0 for dt in hours[:4]),
+        "uur-forecast: 'volgend uur' van een uur geleden geldt voor dit uur":
+            all(verschoven[dt] == 0.0 for dt in hours[:4]),
+        "uur-forecast: verse waarde geldt voor het eigen klokuur":
+            all(abs(vers[dt] - 420.0) < 1e-6 for dt in hours[:4]),
+        "uur-forecast: verse waarde raakt het volgende uur niet":
+            all(abs(vers[dt] - 420.0) > 1.0 for dt in hours[4:8]),
+    }
+
+
+def _pv_coordinator():
+    c = make_coordinator()
+    c.ent_pv_now = "sensor.pv_now"
+    c.pv = F.PvCurve(c.t, "sensor.pv_now", "sensor.pv_rest", "sensor.pv_morgen", 1.05,
+                     ent_hour_now="sensor.pv_uur")
+    kwh = {"unit_of_measurement": "kWh"}
+    set_state(c, "sensor.pv_rest", 0.5, kwh)
+    set_state(c, "sensor.pv_morgen", 3.6, kwh)
+    return c, kwh
+
+
+def test_pv_terugval_zonder_meting():
+    """Slot 17|0 leerde 2022 W bij 1052 W gemeten: na zonsondergang is de
+    omvormer unavailable en telde de forecast-PV bij de huislast. Zonder
+    PV-meting: in het donker 0 W en gewoon leren; bij daglicht is de opbrengst
+    onbekend en wordt er niets geleerd en geen forecast opgeteld."""
+    # --- na zonsondergang: verouderde uur-forecast, omvormer slaapt ---
+    _klok(16, 33)
+    c, kwh = _pv_coordinator()
+    set_state(c, "sensor.pv_uur", 2.097, kwh)
+    _klok(17, 10)
+    basis(c, soc_pct=50.0, p1_w=1052.0)
+    set_state(c, "sensor.pv_now", "unavailable")
+    set_prices(c, 0.30, [0.30] * 6)
+    try:
+        _fake_sun((7, 50), (16, 48))
+        run(c._tick(None))
+    finally:
+        _no_sun()
+    donker_last = c.inputs.get("huislast_nu_w")
+    donker_pv = c.inputs.get("pv_nu_w")
+    donker_geleerd = list(c._load_samples)
+
+    # --- daglicht, meting weg, huis exporteert 500 W ---
+    _klok(12, 10)
+    d, kwh = _pv_coordinator()
+    set_state(d, "sensor.pv_uur", 0.9, kwh)
+    basis(d, soc_pct=50.0, p1_w=-500.0)
+    set_state(d, "sensor.pv_now", "unavailable")
+    set_prices(d, 0.30, [0.30] * 6)
+    try:
+        _fake_sun((7, 50), (16, 48))
+        run(d._tick(None))
+    finally:
+        _no_sun()
+    dag_last = d.inputs.get("huislast_nu_w")
+    dag_pv = d.inputs.get("pv_nu_w")
+    dag_geleerd = list(d._load_samples)
+
+    # --- daglicht met meting: last = netto + gemeten PV, wel leren ---
+    e, kwh = _pv_coordinator()
+    set_state(e, "sensor.pv_uur", 0.9, kwh)
+    basis(e, soc_pct=50.0, p1_w=-500.0)
+    set_state(e, "sensor.pv_now", 800.0)
+    set_prices(e, 0.30, [0.30] * 6)
+    try:
+        _fake_sun((7, 50), (16, 48))
+        run(e._tick(None))
+    finally:
+        _no_sun()
+    return {
+        "pv-terugval: donker zonder meting -> geen forecast-PV in de last":
+            donker_last == 1052 and donker_pv == 0,
+        "pv-terugval: donker zonder meting -> last wordt wel geleerd":
+            donker_geleerd == [1052.0],
+        "pv-terugval: daglicht zonder meting -> netto blijft kloppen":
+            dag_last == 0 and dag_pv == 500,
+        "pv-terugval: daglicht zonder meting -> niets geleerd": dag_geleerd == [],
+        "pv-terugval: met meting -> last = netto + gemeten PV, geleerd":
+            e.inputs.get("huislast_nu_w") == 300 and e.inputs.get("pv_nu_w") == 800
+            and e._load_samples == [300.0],
+    }
+
+
 def main():
     suites = [
         test_plan_basis, test_geen_data, test_verkopen_switch,
@@ -1023,7 +1146,8 @@ def main():
         test_typed_decision, test_command_arbitrage, test_tick_serialisatie,
         test_lifecycle_listeners, test_aflopend_commando_verversen,
         test_lege_accu_oud_ontlaadcommando, test_pv_nowcast,
-        test_pv_daglichtvenster,
+        test_pv_daglichtvenster, test_pv_uurforecast_eigen_uur,
+        test_pv_terugval_zonder_meting,
     ]
     failed = []
     total = 0

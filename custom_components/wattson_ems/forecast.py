@@ -119,6 +119,34 @@ class PvCurve:
     def tomorrow_kwh(self) -> float:
         return (self.t.energy_kwh(self.ent_pv_tomorrow) or 0.0) * self.bias
 
+    def is_dark(self, now: datetime) -> bool:
+        """Staat de zon onder? Dan is een ontbrekende PV-meting gewoon 0 W
+        (de omvormer slaapt) en geen gat in de telemetrie."""
+        loc = dt_util.as_local(now)
+        lo, hi = daylight_window(self.t.hass, loc.date())
+        h = loc.hour + loc.minute / 60.0
+        return h < lo or h >= hi
+
+    def _hour_forecast(self, ent: str, shift_h: int) -> tuple[datetime, float] | None:
+        """(lokaal klokuur, kWh) van een uur-forecastsensor, of None.
+
+        De waarde hoort bij het klokuur waarin ze is geschreven (+shift_h voor
+        de 'volgend uur'-sensor), niet bij het uur waarin ze wordt gelezen.
+        Forecast.Solar ververst één keer per uur op een willekeurige minuut;
+        aan het begin van elk uur staat er dus nog de waarde van het vorige
+        uur. 05-11-2026 17:03-17:33: 2,097 kWh van 16 u gelezen als 17 u ->
+        2202 W 'PV' op alle kwartieren na zonsondergang.
+        """
+        if not ent:
+            return None
+        kwh = self.t.energy_kwh(ent)
+        st = self.t.hass.states.get(ent)
+        if kwh is None or st is None:
+            return None
+        written = getattr(st, "last_reported", None) or st.last_updated
+        hour = dt_util.as_local(written).replace(minute=0, second=0, microsecond=0)
+        return hour + timedelta(hours=shift_h), kwh
+
     def curve(self, hours: list[datetime],
               dt_h: list[float] | None = None) -> dict[datetime, float]:
         """Verdeel de PV-forecast dagtotalen over een daglicht-bel (W per slot).
@@ -148,19 +176,18 @@ class PvCurve:
         # huidig en volgend klokuur aanscherpen met de uur-forecast van de bron
         # zelf (kWh per klokuur, geldt voor elke slot in dat uur) — hierop rust
         # de eerstvolgende beslissing en daar timet de bel het slechtst.
-        # Forecast, dus mét bias.
-        if hours:
-            hour0 = hours[0].replace(minute=0, second=0, microsecond=0)
-            for ent, hour in ((self.ent_hour_next, hour0 + timedelta(hours=1)),
-                              (self.ent_hour_now, hour0)):
-                if not ent:
-                    continue
-                kwh = self.t.energy_kwh(ent)
-                if kwh is None:
-                    continue
-                for dt in hours:
-                    if dt.replace(minute=0, second=0, microsecond=0) == hour:
-                        out[dt] = kwh * 1000.0 * self.bias
+        # Forecast, dus mét bias. Elke waarde geldt alleen voor haar eigen
+        # klokuur (_hour_forecast); de verse 'dit uur'-waarde wint van een
+        # 'volgend uur'-waarde die een uur eerder is geschreven.
+        for ent, shift_h in ((self.ent_hour_next, 1), (self.ent_hour_now, 0)):
+            fc = self._hour_forecast(ent, shift_h)
+            if fc is None:
+                continue
+            hour, kwh = fc
+            for dt in hours:
+                if dt_util.as_local(dt).replace(
+                        minute=0, second=0, microsecond=0) == hour:
+                    out[dt] = kwh * 1000.0 * self.bias
         # het huidige uur weten we nóg beter dan elke forecast: de échte
         # meting, dus zonder bias
         pv_now = self.t.power_w(self.ent_pv_now)
