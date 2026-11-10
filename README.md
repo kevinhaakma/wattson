@@ -171,6 +171,14 @@ the vendor manager repeatedly overwriting each other's input limit. The input
 limit, output limit, and AC-mode entities are also used for directional safety
 stops and must refer to the same physical battery.
 
+The fuse group also caps discharge: on `group2000` the device delivers at most
+2000 W even when Wattson's maximum discharge power is set to 2400 W. Wattson
+reads `select.<device>_fuse_group` (derived from the configured
+`number.<device>_output_limit`) and plans with the lower of the two; the
+effective ceiling is published as `ontlaad_max_w` on the advice sensor. If the
+select entity has been renamed, set the maximum discharge power option to the
+fuse-group value yourself.
+
 Low manual setpoints also require the Zendure manager to wake one idle device
 at its official 50 W start threshold. The compatibility patch used by the
 validated Home Assistant installation is versioned as

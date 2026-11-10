@@ -280,6 +280,12 @@ class BatteryAdapter:
     def telemetry_entities(self):
         return (self.c.ent_bat_chg, self.c.ent_bat_dis)
 
+    def discharge_limit_w(self) -> float | None:
+        """Wat het apparaat zelf maximaal ontlaadt (W), of None als de adapter
+        dat niet kan aflezen. De coordinator plant nooit boven deze grens,
+        ook als de optie 'max ontlaadvermogen' hoger staat."""
+        return None
+
     # gedeelde begrenzing: ontladen nooit boven de actuele netto-import
     def _p1_capped(self, power_w: float) -> float:
         # Nooit op één sample begrenzen: de mediaan van de accu-gecorrigeerde
@@ -334,6 +340,50 @@ class ZendureAdapter(BatteryAdapter):
 
     def telemetry_entities(self):
         return (self.c.ent_zd_chg, self.c.ent_zd_dis)
+
+    # Ontlaadgrens per zekeringgroep, zoals de Zendure-manager hem toepast
+    # (zendure_ha manager.update_fusegroups). 'unused' = apparaat buiten de
+    # manager, dus geen grens af te lezen.
+    FUSE_DISCHARGE_W = {
+        "owncircuit": 3600.0, "group800": 800.0, "group800_2400": 800.0,
+        "group1200": 1200.0, "group2000": 2000.0, "group2400": 2400.0,
+        "group3600": 3600.0, "group4000": 4000.0, "group5000": 5000.0,
+    }
+
+    def _fuse_group_entity(self) -> str:
+        """select.<apparaat>_fuse_group, afgeleid van number.<apparaat>_output_limit."""
+        ent = self.c.ent_zd_outlim or ""
+        if ent.startswith("number.") and ent.endswith("_output_limit"):
+            return "select." + ent[len("number."):-len("_output_limit")] + "_fuse_group"
+        return ""
+
+    def discharge_limit_w(self) -> float | None:
+        """Kleinste van de zekeringgroep-grens en het bereik van output_limit.
+
+        09-11-2026: het plan rekende met 2400 W (optie), het apparaat leverde
+        2000 W: fuse_group = group2000, output_limit kwam nooit boven 2000 en
+        output_home_power nooit boven 2004 W. Het max-attribuut van de number
+        zelf blijft 2400 (inverseMaxPower) en verraadt de groepsgrens niet.
+        """
+        hass = self.c.hass
+        limits = []
+        fuse_ent = self._fuse_group_entity()
+        fuse = hass.states.get(fuse_ent) if fuse_ent else None
+        if fuse is not None:
+            if fuse.state in ("unknown", "unavailable", None):
+                return None   # even onleesbaar: laatst bekende grens blijft staan
+            limit = self.FUSE_DISCHARGE_W.get(str(fuse.state))
+            if limit:
+                limits.append(limit)
+        outlim = hass.states.get(self.c.ent_zd_outlim) if self.c.ent_zd_outlim else None
+        if outlim is not None:
+            try:
+                hi = float(outlim.attributes.get("max"))
+                if hi > 0.0:
+                    limits.append(hi)
+            except (TypeError, ValueError):
+                pass
+        return min(limits) if limits else None
 
     async def apply(self, action, power_w, *, p1_cap=True):
         c = self.c

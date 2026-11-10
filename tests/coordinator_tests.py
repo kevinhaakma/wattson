@@ -1133,6 +1133,58 @@ def test_pv_terugval_zonder_meting():
     }
 
 
+def test_ontlaadgrens_apparaat():
+    """09-11: optie 2400 W, maar de Zendure staat op zekeringgroep group2000 en
+    levert nooit meer dan 2000 W. Het plan volgt de grens van het apparaat."""
+    hass = FakeHass()
+    options = {
+        K.CONF_ENT_PRICE: "sensor.prijs",
+        K.CONF_ENT_SOC: "sensor.soc",
+        K.CONF_ENT_P1: "sensor.p1",
+        K.CONF_P_DISCHARGE: 2400.0,
+        K.CONF_ENT_ZD_OUTLIM: "number.sf_output_limit",
+    }
+    c = C.WattsonCoordinator(hass, types.SimpleNamespace(options=options), C.load_params())
+    echte_adapter = isinstance(c.adapter_impl, A.ZendureAdapter)
+    start = c.params.p_discharge_max_w
+    set_state(c, "number.sf_output_limit", 0.0, {"min": 0, "max": 2400})
+    set_state(c, "select.sf_fuse_group", "group2000")
+    c._apply_device_limits()
+    op_2000 = (c.params.p_discharge_max_w, c.params.discharge_levels)
+
+    # plan-tick: dure prijs nu, verkopen aan -> niet meer dan 2000 W gepland
+    c.adapter_impl = FakeAdapter(c, CAPS_SURPLUS)
+    c.caps = CAPS_SURPLUS
+    c.load_profile = F.LoadProfile({})
+    c.sell_enabled = True
+    basis(c, soc_pct=80.0, p1_w=300.0)
+    set_prices(c, 0.90, [0.20] * 6)
+    c.adapter_impl.discharge_limit_w = A.ZendureAdapter(c).discharge_limit_w
+    run(c._tick(None))
+    advies, gepland = c.advies, c.setpoint_w
+    ontlaad_max = c.inputs.get("ontlaad_max_w")
+
+    set_state(c, "select.sf_fuse_group", "unavailable")
+    c._apply_device_limits()
+    onleesbaar = c.params.p_discharge_max_w
+    set_state(c, "select.sf_fuse_group", "group800")
+    c._apply_device_limits()
+    op_800 = c.params.p_discharge_max_w
+    set_state(c, "select.sf_fuse_group", "group3600")
+    c._apply_device_limits()
+    ruim = c.params.p_discharge_max_w
+    return {
+        "ontlaadgrens: zendure-adapter leest de zekeringgroep": echte_adapter and start == 2400.0,
+        "ontlaadgrens: group2000 begrenst het plan op 2000 W":
+            op_2000 == (2000.0, (0.0, 500.0, 1000.0, 1500.0, 2000.0)),
+        "ontlaadgrens: plan-tick verkoopt niet boven 2000 W":
+            ontlaad_max == 2000 and advies == "verkopen" and gepland == -2000.0,
+        "ontlaadgrens: onleesbare groep houdt de laatst bekende grens": onleesbaar == 2000.0,
+        "ontlaadgrens: kleinere groep verlaagt verder": op_800 == 800.0,
+        "ontlaadgrens: ruimere groep gaat niet boven de optie (bereik number 2400)": ruim == 2400.0,
+    }
+
+
 def main():
     suites = [
         test_plan_basis, test_geen_data, test_verkopen_switch,
@@ -1147,7 +1199,7 @@ def main():
         test_lifecycle_listeners, test_aflopend_commando_verversen,
         test_lege_accu_oud_ontlaadcommando, test_pv_nowcast,
         test_pv_daglichtvenster, test_pv_uurforecast_eigen_uur,
-        test_pv_terugval_zonder_meting,
+        test_pv_terugval_zonder_meting, test_ontlaadgrens_apparaat,
     ]
     failed = []
     total = 0

@@ -200,6 +200,11 @@ class WattsonCoordinator:
         # actie-niveaus schalen mee met de ingestelde vermogens
         p_chg = float(o(CONF_P_CHARGE))
         p_dis = float(o(CONF_P_DISCHARGE))
+        # ingestelde ontlaadgrens; de werkelijke plangrens is het minimum van
+        # deze optie en wat het apparaat zelf toelaat (_apply_device_limits)
+        self._p_dis_cfg = p_dis
+        self._p_dis_low_cfg = float(b.get("p_discharge_low_w", p_dis))
+        self._device_dis_limit_w: float | None = None
         self.params = P.Params(
             capacity_kwh=cap, soc_min_kwh=min_soc, soc_max_kwh=max_soc,
             p_charge_max_w=p_chg, p_discharge_max_w=p_dis,
@@ -537,6 +542,7 @@ class WattsonCoordinator:
             if self._stopped:
                 return
             await self._apply_soc_ceiling()
+            self._apply_device_limits()
             await self._plan_and_apply()
             self.plan_error = None
         except Exception as err:  # noqa: BLE001 - watchdog: nooit crashen, wel loggen
@@ -848,6 +854,7 @@ class WattsonCoordinator:
             "pv_nu_w": round(steps[0].pv_w),
             "accu_laden_w": round(context.battery_charge_w),
             "accu_ontladen_w": round(context.battery_discharge_w),
+            "ontlaad_max_w": round(self.params.p_discharge_max_w),
             "pv_rest_vandaag_kwh": round(self.pv.remain_kwh(), 1),
             "pv_morgen_kwh": round(self.pv.tomorrow_kwh(), 1),
             "ev_laadt": context.ev_now,
@@ -1391,6 +1398,31 @@ class WattsonCoordinator:
             await A.set_number(
                 self.hass, self.ent_zd_socset,
                 100.0 if self.cal_window else self._max_soc_pct)
+
+    def _apply_device_limits(self) -> None:
+        """Plan nooit boven wat het apparaat werkelijk ontlaadt.
+
+        De optie 'max ontlaadvermogen' is een wens; de adapter leest de echte
+        grens af (Zendure: zekeringgroep). 09-11-2026 plande Wattson -2400 W
+        terwijl het apparaat op group2000 maximaal 2000 W leverde, zodat de
+        geplande SoC en opbrengst na elk verkoopuur niet klopten. Een
+        onleesbare grens (herstart, entity even weg) laat de laatst bekende
+        staan.
+        """
+        read = getattr(self.adapter_impl, "discharge_limit_w", None)
+        limit = read() if callable(read) else None
+        if limit is not None and limit > 0.0:
+            self._device_dis_limit_w = float(limit)
+        p_dis = self._p_dis_cfg
+        if self._device_dis_limit_w is not None:
+            p_dis = min(p_dis, self._device_dis_limit_w)
+        if p_dis == self.params.p_discharge_max_w:
+            return
+        _LOGGER.info("Wattson: ontlaadgrens %.0f W (optie %.0f W, apparaat %s W)",
+                     p_dis, self._p_dis_cfg, self._device_dis_limit_w)
+        self.params.p_discharge_max_w = p_dis
+        self.params.discharge_levels = tuple(p_dis * i / 4 for i in range(5))
+        self.params.p_discharge_low_w = min(self._p_dis_low_cfg, p_dis)
 
     def _calibration_note(self) -> dict:
         """Kalibratie-informatie voor de attributen: venster actief (plafond
