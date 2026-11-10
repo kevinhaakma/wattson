@@ -42,7 +42,15 @@ def planner_params():
         p_discharge_max_w=1400.0,
         charge_levels=(0.0, 500.0, 1000.0, 1500.0, 2000.0),
         discharge_levels=(0.0, 350.0, 700.0, 1050.0, 1400.0),
-        eta_nom=battery["eta_nom"],
+        # Juli-kalibratie, net als de 1400 W-grenzen hierboven: deze scenario's
+        # zijn metingen van 14-17 juli en horen bij het apparaatmodel van toen.
+        # Met de herijking van 10-11-2026 (0,935) kantelt het dubbeltje van
+        # 17 juli 13:00: de DP laadt dan 1500 W om 14:00 i.p.v. 13:00 (prijs-
+        # verschil €0,0003/kWh). Oorzaak is niet het rendement maar de
+        # onzekerheids-fade, die ook toekomstige laadkosten afwaardeert; bij
+        # 0,955 verborg de afronding op het 0,02 kWh-raster dat (met raster
+        # 0,01 schuift ook 0,955 naar 14:00). Open punt, zie verslag 10-11.
+        eta_nom=0.955,
         p_fix_w=battery["p_fix_w"],
         standby_w=battery["standby_w"],
         deg_cost=0.02,

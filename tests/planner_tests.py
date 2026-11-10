@@ -1,5 +1,6 @@
 """Regressietests voor reserve, zonbudget en onuitvoerbare planacties."""
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -124,7 +125,32 @@ def main():
     check("laadplafond onder lambda", abs(ceil - (0.20 - 0.03) * 0.955) < 1e-9)
     check("drempels laten winstruimte tussen laden en ontladen", ceil < floor)
 
-    print("\n18/18 PASS")
+    # --- herijking 2026-11-10: rendement en ontlaad-knik ---
+    # Gemeten op de recorder, SoC-neutraal venster 01-11 19:46 .. 09-11 18:41
+    # (190,9 u): 41,30 kWh geladen, 35,04 kWh ontladen (rondrit 0,848).
+    bat = json.loads((HERE.parent / "custom_components" / "wattson_ems"
+                      / "params.json").read_text(encoding="utf-8"))["battery"]
+
+    def balans(eta, standby_w):
+        return 41.30 * eta - 35.04 / eta - standby_w * 190.9 / 1000.0
+
+    check("verliesmodel sluit de gemeten massabalans (|rest| < 0,1 kWh)",
+          abs(balans(bat["eta_nom"], bat["standby_w"])) < 0.1)
+    check("oude 0,955 hield 1,6 kWh over die er niet was",
+          balans(0.955, 6.0) > 1.5)
+    check("planner-default spiegelt params.json", P.Params().eta_nom == bat["eta_nom"])
+    # 09-11 18:17-18:44: 2,0 kW van 30 % tot 13 % SoC -> geen knik meer
+    echt = P.Params(capacity_kwh=5.76, soc_min_kwh=0.576, soc_max_kwh=5.184,
+                    p_discharge_max_w=2000.0, eta_nom=bat["eta_nom"], p_fix_w=0.0,
+                    soc_knee_kwh=bat.get("soc_knee_kwh", 0.0),
+                    p_discharge_low_w=min(bat.get("p_discharge_low_w", 2000.0), 2000.0))
+    _, soc_na, act, _ = P.hour_result(P.Step(0.80, 0.80, 300.0, 0.0, sell_ok=True, dt_h=0.25),
+                                      -2000.0, 0.30 * 5.76, echt)
+    check("onder 30 % SoC levert het model het volle vermogen", abs(act + 2000.0) < 1e-6)
+    check("een kwartier 2 kW kost 0,5 kWh / rendement uit de accu",
+          abs((0.30 * 5.76 - soc_na) - 0.5 / bat["eta_nom"]) < 1e-9)
+
+    print("\n23/23 PASS")
 
 
 if __name__ == "__main__":

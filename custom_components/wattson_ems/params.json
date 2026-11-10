@@ -183,10 +183,9 @@
   "soc_max_kwh": 5.76,
   "p_charge_max_w": 2000.0,
   "p_discharge_max_w": 1400.0,
-  "eta_nom": 0.955,
+  "eta_nom": 0.935,
   "p_fix_w": 0.0,
   "standby_w": 6.0,
-  "soc_knee_kwh": 1.73,
-  "p_discharge_low_w": 700.0
+  "soc_knee_kwh": 0.0
  }
 }

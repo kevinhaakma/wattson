@@ -56,8 +56,10 @@ def main():
             "capacity_kwh": 5.76, "soc_min_kwh": 0.58, "soc_max_kwh": 5.76,
             # apparaat-realiteit: opties laden 2000 W, inverse_max_power 1400 W
             "p_charge_max_w": 2000.0, "p_discharge_max_w": 1400.0,
-            # gekalibreerd op massabalans 2026-07-07..15 (zie planner.Params)
-            "eta_nom": 0.955, "p_fix_w": 0.0, "standby_w": 6.0,
+            # gekalibreerd op massabalans 2026-11-01..09 (zie planner.Params);
+            # ontlaad-knik uit: het apparaat levert vol vermogen tot ~13 % SoC
+            "eta_nom": 0.935, "p_fix_w": 0.0, "standby_w": 6.0,
+            "soc_knee_kwh": 0.0,
         },
     }
     # canoniek doel: de actieve Wattson-integratie (hus_battery_ems is bevroren legacy)

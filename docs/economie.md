@@ -10,11 +10,21 @@ gemeten verlies 4,36 kWh, model voorspelt 4,34 kWh met:
 
 | parameter | waarde | betekenis |
 |---|---|---|
-| `eta_nom` | 0,955 | rendement per richting → round-trip ≈ 0,91 |
+| `eta_nom` | 0,935 | rendement per richting → round-trip ≈ 0,87 (0,85 incl. standby) |
 | `p_fix_w` | 0 | geen vaste vermogensstraf meetbaar |
 | `standby_w` | 6 | continu eigenverbruik, ook in rust |
 
 Geen datasheetwaarden; gefit op dit specifieke apparaat.
+
+**Herijking 10-11-2026.** De 0,955 hierboven kwam uit juli (ontladen op
+1400 W). Over twee SoC-neutrale vensters van 01 t/m 09-11 (191 uur, ontladen
+tot 2000 W) is 41,30 kWh geladen en 35,04 kWh ontladen: rondrit 0,848. Met
+6 W standby sluit de balans bij 0,935 per richting; 0,955 hield 1,6 kWh over
+die er niet was. Gevolg voor de cijfers: een backtest op 28 dagen
+(11-10 t/m 09-11, perfecte voorkennis, gebalanceerd) gaf met het oude model
+€0,51/dag, op het echte apparaat €0,45/dag. De ontlaad-knik (700 W onder
+30 % SoC, gemeten in augustus) is uitgezet: op 09-11 leverde het apparaat
+2,0 kW van 30 % tot 13 % SoC.
 
 ## 2. Terugleververgoeding onder saldering — gemeten + onderzocht
 

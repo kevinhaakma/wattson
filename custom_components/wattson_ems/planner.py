@@ -39,17 +39,22 @@ class Params:
         # minuutdata: p95 per SoC-band = 1398-1400 W boven 30%, 700-701 W
         # in 10-30% (2072 samples) — een harde halvering, geen toeval.
         # Default = geen knik (low == max), dus alleen actief als params.json
-        # of de coordinator hem zet.
+        # of de coordinator hem zet. Sinds 2026-11 staat hij in params.json
+        # uit: met de 2000 W-grens levert het apparaat 2,0 kW door tot 13 %
+        # SoC (09-11 18:17-18:44: 30 % -> 13 % op gemiddeld 1999 W). De 700 W
+        # die daarna nog in de data stond was Wattsons eigen plan, niet het BMS.
         self.p_discharge_low_w = 1400.0
         self.soc_knee_kwh = 0.0
-        # Verliesmodel gekalibreerd op de massabalans van het echte apparaat
-        # (179 u, 2026-07-07..15: 37,3 kWh in / 33,6 kWh uit / ΔSoC −0,67 =
-        # 4,36 kWh verlies; model met deze waarden voorspelt 4,34). De oude
-        # aannames (0,92 / 25 W) overschatten het verlies 2,3× en lieten de
-        # DP winstgevende cycli afwijzen. Een vermogensafhankelijke straf
-        # (p_fix) is in de meetdata niet aantoonbaar; het vaste eigenverbruik
-        # zit apart in standby_w en loopt ALTIJD door (apparaat staat aan).
-        self.eta_nom = 0.955           # conversierendement één richting, nominaal
+        # Verliesmodel gekalibreerd op de massabalans van het echte apparaat.
+        # Herijkt 2026-11-10 op twee SoC-neutrale vensters (01..09-11, 191 u):
+        # 41,30 kWh geladen / 35,04 kWh ontladen = rondrit 0,848. Met 6 W
+        # standby sluit de balans bij 0,935 per richting (27 vensters op
+        # minuutdata: 0,934); de oude 0,955 (zomer, 1400 W ontladen, rondrit
+        # 0,912) liet over dat venster 1,6 kWh lading 'over' die er niet was
+        # en rekende besparingen ~13 % te hoog. Een vermogensafhankelijke straf
+        # (p_fix) is in de meetdata niet te scheiden van standby; het vaste
+        # eigenverbruik zit apart in standby_w en loopt ALTIJD door.
+        self.eta_nom = 0.935           # conversierendement één richting, nominaal
         self.p_fix_w = 0.0             # vermogensafhankelijke verliezen per richting
         self.standby_w = 0.0           # continu eigenverbruik uit de accu (W)
         self.deg_cost = 0.04           # €/kWh doorzet (accu-zijde)
