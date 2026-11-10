@@ -6,7 +6,8 @@ daarna via een exponentieel gemiddelde naar de werkelijkheid toe (observe).
 Het profiel volgt zo vanzelf seizoenen en gedragsveranderingen (airco-zomers,
 stookwinters, nieuwe apparaten) zonder handmatige hertraining. De geleerde
 waarden overleven een herstart via een HA-Store (zie coordinator).
-PvCurve: verdeelt de dag-prognoses over een daglicht-bel; het huidige uur
+PvCurve: verdeelt de dag-prognoses over een daglicht-bel (zonsopkomst tot
+zonsondergang, zie daylight_window); het huidige uur
 komt van de echte PV-meting (geen bias — dat is een meting, geen forecast),
 en de verhouding meting/forecast stuurt de rest van vandaag bij (nowcast).
 """
@@ -19,6 +20,32 @@ from homeassistant.util import dt as dt_util
 
 from .const import DAGLICHT, NOWCAST_MIN_FC_W, NOWCAST_RATIO, NOWCAST_TAU_H
 from .telemetry import Telemetry
+
+
+def _local_hours(dt: datetime) -> float:
+    loc = dt_util.as_local(dt)
+    return loc.hour + loc.minute / 60.0 + loc.second / 3600.0
+
+
+def daylight_window(hass, day) -> tuple[float, float]:
+    """Zonsopkomst en -ondergang op `day` als lokale decimale uren.
+
+    DAGLICHT (7, 21) is een zomerstand: in november verdeelde de bel daarmee
+    PV tot 21 u (plan 10-11-2026 08:45: 364 W om 17 u, 214 W om 18 u, terwijl
+    de zon om 16:48 onder ging). Het venster volgt nu de zon van HA's eigen
+    locatie; zonder zonpositie (geen locatie, poolnacht, tests) blijft
+    DAGLICHT de terugval.
+    """
+    try:
+        from homeassistant.helpers.sun import get_astral_event_date
+        rise = get_astral_event_date(hass, "sunrise", day)
+        sett = get_astral_event_date(hass, "sunset", day)
+    except Exception:  # noqa: BLE001 - helper ontbreekt (tests) of geen locatie
+        return DAGLICHT
+    if rise is None or sett is None:
+        return DAGLICHT
+    lo, hi = _local_hours(rise), _local_hours(sett)
+    return (lo, hi) if hi - lo >= 1.0 else DAGLICHT
 
 
 class LoadProfile:
@@ -100,20 +127,21 @@ class PvCurve:
         dts = dt_h or [1.0] * len(hours)
         remain = self.remain_kwh()
         tomorrow = self.tomorrow_kwh()
-        lo, hi = DAGLICHT
         # HA-tijdzone, niet de host-OS-tijdzone (docker draait vaak op UTC)
         today = dt_util.now().date()
 
-        def bell(loc):  # gewicht per lokaal tijdstip
-            h = loc.hour + loc.minute / 60.0
+        def bell(loc, slot_h, lo, hi):  # gewicht van een slot, op zijn midden
+            h = loc.hour + loc.minute / 60.0 + slot_h / 2.0
             if h < lo or h >= hi:
                 return 0.0
             return math.sin((h - lo) / (hi - lo) * math.pi) ** 2
 
         out = {}
         for day, budget in ((today, remain), (today + timedelta(days=1), tomorrow)):
+            # daglichtvenster per dag: zonsopkomst tot zonsondergang
+            lo, hi = daylight_window(self.t.hass, day)
             idx = [i for i, dt in enumerate(hours) if dt_util.as_local(dt).date() == day]
-            weights = [bell(dt_util.as_local(hours[i])) for i in idx]
+            weights = [bell(dt_util.as_local(hours[i]), dts[i], lo, hi) for i in idx]
             tot = sum(w * dts[i] for w, i in zip(weights, idx))
             for i, w in zip(idx, weights):
                 out[hours[i]] = (budget * w / tot * 1000.0) if tot > 0 else 0.0

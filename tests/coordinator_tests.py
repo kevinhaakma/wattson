@@ -953,6 +953,63 @@ def test_pv_nowcast():
     }
 
 
+def _fake_sun(rise_hm, set_hm):
+    """Installeer een homeassistant.helpers.sun-stub met vaste zontijden."""
+    mod = types.ModuleType("homeassistant.helpers.sun")
+
+    def get_astral_event_date(hass, event, day):
+        h, m = rise_hm if event == "sunrise" else set_hm
+        return datetime(day.year, day.month, day.day, h, m, tzinfo=timezone.utc)
+
+    mod.get_astral_event_date = get_astral_event_date
+    sys.modules["homeassistant.helpers.sun"] = mod
+
+
+def _no_sun():
+    sys.modules.pop("homeassistant.helpers.sun", None)
+
+
+def test_pv_daglichtvenster():
+    """10-11: DAGLICHT (7, 21) plande 364 W PV om 17 u terwijl de zon om 16:48
+    onder ging. De bel volgt nu zonsopkomst/-ondergang; het dagbudget blijft
+    behouden. Zonder zonpositie blijft de oude terugval werken."""
+    c = make_coordinator()
+    kwh = {"unit_of_measurement": "kWh"}
+    set_state(c, "sensor.pv_rest", 4.8, kwh)
+    set_state(c, "sensor.pv_morgen", 3.6, kwh)
+    pv = F.PvCurve(c.t, "", "sensor.pv_rest", "sensor.pv_morgen", 1.0)
+    base = _dt.now().replace(hour=8, minute=0, second=0, microsecond=0)
+    hours = [_dt.as_utc(base + timedelta(minutes=15 * q)) for q in range(0, 4 * 40)]
+    dts = [0.25] * len(hours)
+
+    def uur(dt):
+        loc = _dt.as_local(dt)
+        return loc.hour + loc.minute / 60.0
+
+    vandaag = [dt for dt in hours if _dt.as_local(dt).date() == base.date()]
+    morgen = [dt for dt in hours if _dt.as_local(dt).date() != base.date()]
+    try:
+        _fake_sun((7, 50), (16, 48))
+        zon = pv.curve(hours, dts)
+    finally:
+        _no_sun()
+    oud = pv.curve(hours, dts)
+    piek = max(vandaag, key=lambda dt: zon[dt])
+    return {
+        "daglicht: geen PV na zonsondergang (vandaag)":
+            all(zon[dt] == 0.0 for dt in vandaag if uur(dt) >= 16.75),
+        "daglicht: geen PV voor zonsopkomst en na zonsondergang (morgen)":
+            all(zon[dt] == 0.0 for dt in morgen if uur(dt) < 7.75 or uur(dt) >= 16.75),
+        "daglicht: wel PV kort voor zonsondergang": zon[_dt.as_utc(base.replace(hour=16, minute=0))] > 0.0,
+        "daglicht: dagbudget blijft behouden":
+            abs(sum(zon[dt] for dt in vandaag) * 0.25 - 4800.0) < 1e-6
+            and abs(sum(zon[dt] for dt in morgen) * 0.25 - 3600.0) < 1e-6,
+        "daglicht: piek rond de zonnemiddag, niet om 14 u": 12.0 <= uur(piek) <= 12.5,
+        "daglicht: zonder zonpositie blijft de terugval 7-21 u":
+            oud[_dt.as_utc(base.replace(hour=17, minute=0))] > 0.0,
+    }
+
+
 def main():
     suites = [
         test_plan_basis, test_geen_data, test_verkopen_switch,
@@ -966,6 +1023,7 @@ def main():
         test_typed_decision, test_command_arbitrage, test_tick_serialisatie,
         test_lifecycle_listeners, test_aflopend_commando_verversen,
         test_lege_accu_oud_ontlaadcommando, test_pv_nowcast,
+        test_pv_daglichtvenster,
     ]
     failed = []
     total = 0

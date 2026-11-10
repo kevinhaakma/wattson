@@ -258,7 +258,9 @@ UPDATE_MINUTES = 10        # her-plan interval; realtime werk (bijspringen,
                            # EV-guard, discharge-guard) is event-gedreven en
                            # de veiligheid draait apart op WATCH_INTERVAL_S
 WATCH_INTERVAL_S = 60      # eigen lichte bewakingslus (watchdog + stale-guard)
-DAGLICHT = (7, 21)         # uren waarbinnen de PV-bel wordt verdeeld
+DAGLICHT = (7, 21)         # terugval voor de PV-bel als de zonpositie onbekend
+                           # is; normaal volgt het venster zonsopkomst/-ondergang
+                           # (forecast.daylight_window)
 # PV-nowcast (09-10-2026): wijkt de echte PV-meting nu sterk af van de forecast
 # voor dit uur (regen terwijl Forecast.Solar 600 W zegt), dan schaalt de rest van
 # vandaag mee met die verhouding, uitdempend naar de forecast met tijdconstante TAU.
