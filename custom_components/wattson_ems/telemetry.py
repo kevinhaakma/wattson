@@ -163,3 +163,30 @@ class Telemetry:
             # forecast begint pas bij de volgende slot: lopende slot toevoegen
             out.insert(0, (start, cur))
         return out
+
+    def price_excl_tax_map(self) -> dict[datetime, float]:
+        """Optionele prijs excl. belasting per slot (Zonneplan uur/kwartier) voor post-saldering."""
+        st = self.hass.states.get(self.ent_price)
+        if st is None:
+            return {}
+        out: dict[datetime, float] = {}
+        for item in st.attributes.get("forecast", []) or []:
+            if not isinstance(item, dict):
+                continue
+            try:
+                t = (item.get("datetime") or item.get("start_date")
+                     or item.get("start") or item.get("from"))
+                dt = datetime.fromisoformat(str(t).replace("Z", "+00:00"))
+                excl = item.get("price_tax_excluded")
+                if isinstance(excl, dict) and excl.get("amount") is not None:
+                    price = float(excl["amount"]) / 1e7
+                elif item.get("electricity_price_excl_tax") is not None:
+                    price = float(item["electricity_price_excl_tax"]) / 1e7
+                else:
+                    continue
+            except (KeyError, ValueError, TypeError):
+                continue
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            out[dt] = price
+        return out

@@ -426,8 +426,13 @@ class DischargeController:
         """Elk fysiek commando (planner, assist, veiligheid) reset het bewijs."""
         if self.c.caps.p1_matching:
             return
-        self.loop.note_command(
-            time.monotonic(), applied if action == "ontladen" else 0.0)
+        p1 = self.c.t.fresh_power_w(self.c.ent_p1, 60)
+        if p1 is not None:
+            self.loop._last_p1 = p1
+        eff = applied if action == "ontladen" else 0.0
+        self.loop.note_command(time.monotonic(), eff)
+        if eff == 0.0:
+            self.loop.unconfirmed = 0
 
     @callback
     def on_p1(self, _event) -> None:
@@ -523,12 +528,13 @@ class DischargeController:
         cmd_t = self.loop.cmd_t
         if cmd_t is not None and time.monotonic() - cmd_t < DIS_LOOP_LATENCY_S + 30:
             return True  # nog binnen de latentie: niets te bewijzen
-        if not self.loop.following:
-            return False  # P1-ack: commando's komen niet op de meter terug
         m = self._measured_dis()
-        if m is None:
-            return True
-        return m >= 0.5 * c._last_discharge_w - 50.0
+        if m is not None:
+            if m >= 0.5 * c._last_discharge_w - 50.0:
+                self.loop.unconfirmed = 0
+                return True
+            return False
+        return self.loop.following
 
     async def _apply(self, doel_w: float) -> None:
         c = self.c
@@ -585,8 +591,13 @@ class ChargeController:
     def note_applied(self, action: str, applied: float) -> None:
         if self.c.caps.p1_matching:
             return
-        self.loop.note_command(
-            time.monotonic(), applied if action in ("laden", "laden_overschot") else 0.0)
+        p1 = self.c.t.fresh_power_w(self.c.ent_p1, 60)
+        if p1 is not None:
+            self.loop._last_p1 = p1
+        eff = applied if action in ("laden", "laden_overschot") else 0.0
+        self.loop.note_command(time.monotonic(), eff)
+        if eff == 0.0:
+            self.loop.unconfirmed = 0
 
     def _measured_chg(self) -> float | None:
         return self.c.t.live_power_w(self.c.bat_flow_entities()[0], 180)
@@ -602,12 +613,13 @@ class ChargeController:
         cmd_t = self.loop.cmd_t
         if cmd_t is not None and time.monotonic() - cmd_t < DIS_LOOP_LATENCY_S + 30:
             return True
-        if not self.loop.following:
-            return False  # P1-ack: commando's komen niet op de meter terug
         m = self._measured_chg()
-        if m is None:
-            return True
-        return m >= 0.5 * c._last_charge_w - 50.0
+        if m is not None:
+            if m >= 0.5 * c._last_charge_w - 50.0:
+                self.loop.unconfirmed = 0
+                return True
+            return False
+        return self.loop.following
 
     def _check_stuck(self) -> None:
         now = time.monotonic()

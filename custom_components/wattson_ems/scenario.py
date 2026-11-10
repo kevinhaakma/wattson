@@ -31,20 +31,31 @@ class PriceScenario:
         self.wedge_post = wedge_post
         self.netting_headroom_kwh: float | None = None
 
-    def wedge(self, today: date) -> float:
+    def wedge(self, today: date, post_wedge_override: float | None = None) -> float:
+        post = self.wedge_post if post_wedge_override is None else post_wedge_override
         if today >= SALDERING_EINDE:
-            return self.wedge_post
+            return post
         h = self.netting_headroom_kwh
         if h is None:
             return self.wedge_saldering
         factor = max(0.0, min(h / NETTING_BLEND_KWH, 1.0))
-        return self.wedge_post + (self.wedge_saldering - self.wedge_post) * factor
+        return post + (self.wedge_saldering - post) * factor
 
     def label(self, today: date) -> str:
         return "saldering" if today < SALDERING_EINDE else "geen saldering"
 
-    def export_price(self, import_price: float, today: date) -> float:
-        return max(import_price - self.wedge(today), -0.5)
+    def export_price(
+        self,
+        import_price: float,
+        today: date,
+        price_excl_tax: float | None = None,
+    ) -> float:
+        post_override = (
+            max(import_price - price_excl_tax, 0.0)
+            if price_excl_tax is not None
+            else None
+        )
+        return max(import_price - self.wedge(today, post_override), -0.5)
 
     def transition_warning(self, today: date) -> str | None:
         """Waarschuwing in de aanloop naar (en vlak na) het saldering-einde."""

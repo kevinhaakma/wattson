@@ -664,8 +664,13 @@ class WattsonCoordinator:
         # op elke prijsgrens).
         self._decision_pending = True
         try:
+            sp0 = evaluation.setpoints[0]
+            if (sp0 < 0.0
+                    and (context.soc_pct <= self._min_soc_pct + SOC_EDGE_PCT
+                         or self.floor_capped_discharge_w(abs(sp0)) < self.caps.min_setpoint_w)):
+                sp0 = 0.0
             self.set_decision(PS.decision_from_plan(
-                evaluation.setpoints[0],
+                sp0,
                 context.steps[0],
                 context.wedge,
                 self.values.lam_now(context.soc_kwh),
@@ -706,6 +711,7 @@ class WattsonCoordinator:
         wb_fresh_w = self.ev.max_w(180)
         ev_blind = ev_now and wb_fresh_w <= EV_THRESHOLD_KW * 1000.0
 
+        excl_map = self.t.price_excl_tax_map()
         steps = []
         p1_now = None
         b_chg_now = 0.0
@@ -764,7 +770,7 @@ class WattsonCoordinator:
                         self._note_load_sample(dt_util.utcnow(), load)
             steps.append(P.Step(
                 price_imp=price,
-                price_exp=self.scenario.export_price(price, today),
+                price_exp=self.scenario.export_price(price, today, excl_map.get(dt)),
                 load_w=load,
                 pv_w=pv.get(dt, 0.0),
                 ev_charging=ev_blind if k == 0 else False,
@@ -883,18 +889,64 @@ class WattsonCoordinator:
                 and self.mode is not previous.mode
                 and not context.ev_now and len(steps) > 1):
             forced = 0.0 if previous.mode is AdviceMode.IDLE else previous.setpoint_w
-            c0, soc1, _, _ = P.hour_result(
-                steps[0], forced, context.soc_kwh, self.params)
+            # Bij kwartierprijzen (dt_h < 1.0) vanuit rust zou het vastzetten van
+            # slechts één kwartier (steps[0]) de DP in staat stellen dezelfde
+            # laad-/ontlaadactie 15 min op te schuiven naar een volgend dal-kwartier
+            # tegen €0,001-€0,004 verschil, waardoor laden het hele dal lang wordt
+            # uitgesteld (07-11: 09:45 -> 13:30 overgeslagen). Een wissel vanuit
+            # rust bespaart alleen een relaisklik als het hele geplande fase-blok
+            # vóór de eerste tegenovergestelde actie in rust blijft.
+            n_freeze = 1
+            if (previous.mode is AdviceMode.IDLE
+                    and steps[0].dt_h < 1.0
+                    and evaluation.setpoints
+                    and abs(evaluation.setpoints[0]) > 50.0):
+                sign0 = 1.0 if evaluation.setpoints[0] > 0 else -1.0
+                opp_idx = next(
+                    (i for i in range(1, len(evaluation.setpoints))
+                     if evaluation.setpoints[i] * sign0 < -50.0),
+                    None,
+                )
+                last_same = max(
+                    (i for i in range(0, opp_idx or len(evaluation.setpoints))
+                     if evaluation.setpoints[i] * sign0 > 50.0),
+                    default=0,
+                )
+                target_end = opp_idx if opp_idx is not None else (last_same + 1)
+                n_freeze = max(1, min(target_end, len(steps) - 1))
+            c0 = 0.0
+            soc1 = context.soc_kwh
+            for k_f in range(n_freeze):
+                step_c, soc1, _, _ = P.hour_result(
+                    steps[k_f], forced, soc1, self.params)
+                c0 += step_c
             _, rest = await self.hass.async_add_executor_job(
-                P.plan, steps[1:], soc1, self.params, context.terminal_value)
+                P.plan, steps[n_freeze:], soc1, self.params, context.terminal_value)
             voordeel = max((c0 + rest) - evaluation.cost, 0.0)
             # Een oude laad/ontlaadstand die door SoC-, PV- of lastgrenzen
             # fysiek niets meer kan doen, mag nooit door de euro-demping blijven
             # hangen. Rust (of de nieuwe uitvoerbare richting) volgt direct.
+            soc_pct = getattr(context, "soc_pct", None)
+            at_floor_edge = (
+                previous.mode in (AdviceMode.DISCHARGE, AdviceMode.SELL)
+                and (
+                    (soc_pct is not None and soc_pct <= self._min_soc_pct + SOC_EDGE_PCT)
+                    or self.floor_capped_discharge_w(abs(forced)) < self.caps.min_setpoint_w
+                )
+            )
+            at_ceil_edge = (
+                previous.mode is AdviceMode.CHARGE
+                and soc_pct is not None
+                and soc_pct >= self._effective_max_soc_pct() - SOC_EDGE_PCT
+            )
             stale_active_mode = (
                 previous.mode is not AdviceMode.IDLE
-                and not P.action_is_effective(
-                    steps[0], forced, context.soc_kwh, self.params)
+                and (
+                    not P.action_is_effective(
+                        steps[0], forced, context.soc_kwh, self.params)
+                    or at_floor_edge
+                    or at_ceil_edge
+                )
             )
             if stale_active_mode:
                 self._switch_debt = 0.0
@@ -964,7 +1016,22 @@ class WattsonCoordinator:
                 self._switch_debt = 0.0
                 self._last_mode_switch = time.monotonic()
         else:
-            self._switch_debt = 0.0
+            # In rust blijven voor één tussenkwartier terwijl binnen BRIDGE_GAP_H
+            # weer een actie gepland staat mag opgebouwde wisselschuld niet wissen.
+            keep_debt = False
+            if (previous.mode is AdviceMode.IDLE
+                    and self.mode is AdviceMode.IDLE
+                    and evaluation.setpoints):
+                elapsed_h = 0.0
+                for k in range(1, len(evaluation.setpoints)):
+                    elapsed_h += steps[k - 1].dt_h
+                    if elapsed_h > BRIDGE_GAP_H + 1e-9:
+                        break
+                    if abs(evaluation.setpoints[k]) > 50.0:
+                        keep_debt = True
+                        break
+            if not keep_debt:
+                self._switch_debt = 0.0
 
     def _guard_suspect_ev(self, context: PS.PlanningContext) -> None:
         """Parkeer één tick bij een onbevestigde, EV-achtige lastsprong."""
@@ -1276,6 +1343,10 @@ class WattsonCoordinator:
             return dt_util.parse_datetime(st.state)
         except (ValueError, TypeError):
             return None
+
+    def _effective_max_soc_pct(self) -> float:
+        """Actueel planplafond in %: 100% in het kalibratievenster, anders max_soc_pct."""
+        return 100.0 if self.cal_window else self._max_soc_pct
 
     async def _apply_soc_ceiling(self) -> None:
         """Planplafond + apparaatplafond: max_soc_pct, of 100% in het
